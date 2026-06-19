@@ -1,0 +1,146 @@
+{
+    "name": "certificate-util",
+    "displayName": "Certificate Utility Tools",
+    "description": "Focused certificate utilities for validating, decoding, inspecting, and checking X.509 certificate expiration from VS Code.",
+    "version": "0.0.2",
+    "publisher": "framedparadox",
+    "license": "MIT",
+    "icon": "resources/certificate.png",
+    "keywords": [
+        "certificate",
+        "x509",
+        "pem",
+        "der",
+        "ssl",
+        "tls",
+        "pkcs12",
+        "jks",
+        "expiry",
+        "developer tools"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/framedparadox/cert-util-vscode.git"
+    },
+    "bugs": {
+        "url": "https://github.com/framedparadox/cert-util-vscode/issues"
+    },
+    "homepage": "https://github.com/framedparadox/cert-util-vscode#readme",
+    "engines": {
+        "vscode": "^1.105.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [],
+    "main": "./dist/extension.js",
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "certificateUtil-explorer",
+                    "title": "Certificates",
+                    "icon": "resources/icons/certificate.svg"
+                }
+            ]
+        },
+        "views": {
+            "certificateUtil-explorer": [
+                {
+                    "id": "certificateUtilToolsView",
+                    "name": "Certificate Tools",
+                    "icon": "resources/icons/certificate.svg",
+                    "type": "webview"
+                }
+            ]
+        },
+        "commands": [
+            {
+                "command": "certificateUtil.openCertificateTools",
+                "title": "Certificate Tools",
+                "icon": "$(shield)"
+            },
+            {
+                "command": "certificateUtil.inspectActiveCertificate",
+                "title": "Inspect Active Certificate",
+                "icon": "$(file-code)"
+            },
+            {
+                "command": "certificateUtil.inspectCertificateFile",
+                "title": "Inspect Certificate File",
+                "icon": "$(folder-opened)"
+            },
+            {
+                "command": "certificateUtil.inspectRemoteCertificate",
+                "title": "Inspect Remote Certificate",
+                "icon": "$(globe)"
+            },
+            {
+                "command": "certificateUtil.openInspectTool",
+                "title": "Open Inspect Tool",
+                "icon": "$(search)"
+            },
+            {
+                "command": "certificateUtil.openValidateTool",
+                "title": "Open Validate Tool",
+                "icon": "$(verified)"
+            },
+            {
+                "command": "certificateUtil.openChainTool",
+                "title": "Open Chain Tool",
+                "icon": "$(list-tree)"
+            },
+            {
+                "command": "certificateUtil.openConvertTool",
+                "title": "Open Convert Tool",
+                "icon": "$(arrow-swap)"
+            },
+            {
+                "command": "certificateUtil.openKeystoreTool",
+                "title": "Open Keystore Tool",
+                "icon": "$(database)"
+            },
+            {
+                "command": "certificateUtil.openRemoteTool",
+                "title": "Open Remote Tool",
+                "icon": "$(globe)"
+            },
+            {
+                "command": "certificateUtil.openExpiryChecker",
+                "title": "Certificate Expiry Checker",
+                "icon": "$(calendar)"
+            }
+        ]
+    },
+    "scripts": {
+        "postinstall": "npm run compile",
+        "vscode:prepublish": "npm run package",
+        "compile": "webpack",
+        "watch": "webpack --watch",
+        "package": "webpack --mode production --devtool hidden-source-map",
+        "compile-tests": "tsc -p . --outDir out",
+        "watch-tests": "tsc -p . -w --outDir out",
+        "pretest": "npm run compile-tests && npm run compile && npm run lint",
+        "lint": "eslint src",
+        "lint:fix": "eslint src --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "test": "vscode-test",
+        "build": "webpack --mode development"
+    },
+    "devDependencies": {
+        "@types/mocha": "^10.0.10",
+        "@types/node": "22.x",
+        "@types/vscode": "^1.105.0",
+        "@typescript-eslint/eslint-plugin": "^8.45.0",
+        "@typescript-eslint/parser": "^8.45.0",
+        "@vscode/test-cli": "^0.0.11",
+        "@vscode/test-electron": "^2.5.2",
+        "eslint": "^9.36.0",
+        "prettier": "^3.6.2",
+        "ts-loader": "^9.5.4",
+        "typescript": "^5.9.3",
+        "webpack": "^5.102.0",
+        "webpack-cli": "^6.0.1"
+    }
+}
