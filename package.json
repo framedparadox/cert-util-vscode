@@ -2,7 +2,7 @@
     "name": "certi",
     "displayName": "Certificate Utility",
     "description": "Certificate utilities for validating, decoding, inspecting, and checking X.509 certificate expiration from VS Code.",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "publisher": "framedparadox",
     "license": "MIT",
     "icon": "resources/certificate.png",

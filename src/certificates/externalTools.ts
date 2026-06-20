@@ -303,13 +303,20 @@ export function buildJksPemExportCommands(
         '-destalias',
         alias,
     ];
+    // Read the store password from a file rather than embedding it on the command line, so the
+    // generated (and copyable) recipe does not leak the secret into shell history or the DOM. The
+    // same file is reused for the OpenSSL extraction because the intermediate PKCS#12 is written
+    // with the store password.
+    const passwordFile = 'storepass.txt';
     if (password) {
-        args.push('-srcstorepass', password, '-deststorepass', password);
+        args.push('-srcstorepass:file', passwordFile, '-deststorepass:file', passwordFile);
     }
 
+    const passinArgs = password ? ['-passin', `file:${passwordFile}`] : [];
     return [
         buildKeytoolCommand(args),
-        buildPkcs12PemExportCommands(pkcs12OutputPath, certificateOutputPath, keyOutputPath, password),
+        buildOpenSslCommand(['pkcs12', '-in', pkcs12OutputPath, ...passinArgs, '-clcerts', '-nokeys', '-out', certificateOutputPath]),
+        buildOpenSslCommand(['pkcs12', '-in', pkcs12OutputPath, ...passinArgs, '-nocerts', '-nodes', '-out', keyOutputPath]),
     ].join('\n');
 }
 

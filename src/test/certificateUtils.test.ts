@@ -194,6 +194,13 @@ suite('externalTools helpers', () => {
         assert.ok(buildJksToPkcs12Command('keystore.jks').includes('PKCS12'));
     });
 
+    test('keeps store passwords out of generated JKS recipes', () => {
+        const command = buildJksPemExportCommands('keystore.jks', 'server', 'keystore.p12', 'cert.pem', 'key.pem', 's3cr3t-pass');
+        assert.ok(!command.includes('s3cr3t-pass'), 'password must not be embedded in the command');
+        assert.ok(command.includes('-srcstorepass:file'), 'keytool should read the password from a file');
+        assert.ok(command.includes('file:storepass.txt'), 'OpenSSL should read the password from a file');
+    });
+
     test('parses OpenSSL-like outputs that contain PEM certificates', () => {
         assert.strictEqual(parsePkcsCertificateOutput(TEST_CERT_PEM), 1);
         assert.strictEqual(parseRemoteInspectionOutput(`${TEST_CERT_PEM}\n${TEST_CERT_PEM}`), 2);

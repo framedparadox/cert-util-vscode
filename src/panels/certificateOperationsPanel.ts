@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExternalToolAvailability, parseCertificateInputFromFile } from '../certificates/certificateUtils';
@@ -21,6 +22,19 @@ type KeystoreType = 'auto' | 'jks' | 'pkcs12';
 
 interface LaunchRequest {
     initialTab?: OperationTab;
+}
+
+function normalizePassword(password: string | undefined): string | undefined {
+    const trimmed = password?.trim();
+    return trimmed ? trimmed : undefined;
+}
+
+function readFileAsText(filePath: string): string | undefined {
+    try {
+        return fs.readFileSync(filePath, 'utf8');
+    } catch {
+        return undefined;
+    }
 }
 
 export class CertificateOperationsPanel {
@@ -126,6 +140,7 @@ export class CertificateOperationsPanel {
             const certPath = message.certPath?.trim();
             const keyPath = message.keyPath?.trim();
             const outputPath = message.outputPath?.trim();
+            const password = normalizePassword(message.password);
 
             switch (message.action) {
                 case 'pemToDer':
@@ -152,7 +167,7 @@ export class CertificateOperationsPanel {
                     if (!bundlePath) {
                         throw new Error('Bundle file path is required.');
                     }
-                    const result = inspectPkcs12File(bundlePath, message.password);
+                    const result = inspectPkcs12File(bundlePath, password);
                     this.postTextResult('convert', {
                         title: 'PKCS#12 Inspection',
                         summary: result.summary,
@@ -183,7 +198,7 @@ export class CertificateOperationsPanel {
                     this.postTextResult('convert', {
                         title: 'PKCS#12 Export Command',
                         summary: 'Run this OpenSSL command to build a PKCS#12 bundle from a certificate and private key.',
-                        command: buildPkcs12ExportCommand(certPath, keyPath, outputPath || 'certificate.p12', message.password),
+                        command: buildPkcs12ExportCommand(certPath, keyPath, outputPath || 'certificate.p12', password),
                     });
                     return;
                 case 'inspectCsr': {
@@ -198,7 +213,7 @@ export class CertificateOperationsPanel {
                     this.postTextResult('convert', {
                         title: 'CSR Inspection',
                         summary: 'The selected file is classified as a certificate signing request.',
-                        body: artifact.rawText || artifact.blockTypes.join(', '),
+                        body: artifact.rawText || readFileAsText(filePath) || artifact.blockTypes.join(', '),
                         warnings: artifact.warnings,
                     });
                     return;
@@ -228,11 +243,12 @@ export class CertificateOperationsPanel {
             }
 
             const alias = message.alias?.trim();
+            const password = normalizePassword(message.password);
             const keystoreType = this.resolveKeystoreType(keystorePath, message.keystoreType || 'auto');
 
             switch (message.action) {
                 case 'listAliases': {
-                    const result = listJksAliases(keystorePath, message.password);
+                    const result = listJksAliases(keystorePath, password);
                     this.postTextResult('keystore', {
                         title: 'JKS Alias Listing',
                         summary: result.summary,
@@ -264,8 +280,15 @@ export class CertificateOperationsPanel {
                     const pkcs12OutputPath = message.pkcs12OutputPath?.trim() || 'keystore-export.p12';
                     const command =
                         keystoreType === 'jks'
-                            ? this.buildJksPemExportCommand(keystorePath, alias, pkcs12OutputPath, certificateOutputPath, keyOutputPath, message.password)
-                            : buildPkcs12PemExportCommands(keystorePath, certificateOutputPath, keyOutputPath, message.password);
+                            ? this.buildJksPemExportCommand(keystorePath, alias, pkcs12OutputPath, certificateOutputPath, keyOutputPath, password)
+                            : buildPkcs12PemExportCommands(keystorePath, certificateOutputPath, keyOutputPath, password);
+
+                    const warnings = ['The private key command writes an unencrypted PEM key. Protect the output file.'];
+                    if (keystoreType === 'jks' && password) {
+                        warnings.push(
+                            'The keytool command reads the store password from a file. Create it first, e.g. `printf %s "<password>" > storepass.txt`, and delete it afterwards.'
+                        );
+                    }
 
                     this.postTextResult('keystore', {
                         title: 'Export Certificate and Key as PEM',
@@ -274,7 +297,7 @@ export class CertificateOperationsPanel {
                                 ? 'Run these commands to convert the JKS alias to PKCS#12, then export the certificate and private key as PEM.'
                                 : 'Run these OpenSSL commands to export the certificate and private key as PEM from the PFX/PKCS#12 bundle.',
                         command,
-                        warnings: ['The private key command writes an unencrypted PEM key. Protect the output file.'],
+                        warnings,
                     });
                     return;
                 }
