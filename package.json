@@ -1,8 +1,8 @@
 {
-    "name": "certificate-util",
-    "displayName": "Certificate Utility Tools",
-    "description": "Focused certificate utilities for validating, decoding, inspecting, and checking X.509 certificate expiration from VS Code.",
-    "version": "0.0.2",
+    "name": "certi",
+    "displayName": "Certificate Utility",
+    "description": "Certificate utilities for validating, decoding, inspecting, and checking X.509 certificate expiration from VS Code.",
+    "version": "0.0.1",
     "publisher": "framedparadox",
     "license": "MIT",
     "icon": "resources/certificate.png",
@@ -59,6 +59,11 @@
                 "command": "certificateUtil.openCertificateTools",
                 "title": "Certificate Tools",
                 "icon": "$(shield)"
+            },
+            {
+                "command": "certificateUtil.openCertificateOperations",
+                "title": "Certificate Conversion & Keystore",
+                "icon": "$(key)"
             },
             {
                 "command": "certificateUtil.inspectActiveCertificate",

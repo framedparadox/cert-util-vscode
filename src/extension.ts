@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { CertificateExpiryPanel, CertificatePanel } from './panels';
+import { CertificateExpiryPanel, CertificateOperationsPanel, CertificatePanel } from './panels';
 import { CertificateToolsProvider } from './providers';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -25,12 +25,16 @@ export function activate(context: vscode.ExtensionContext) {
         CertificatePanel.render(context.extensionUri, { type: 'open-tab', initialTab: 'chain' });
     });
 
+    const operationsCommand = vscode.commands.registerCommand('certificateUtil.openCertificateOperations', () => {
+        CertificateOperationsPanel.render(context.extensionUri);
+    });
+
     const convertToolCommand = vscode.commands.registerCommand('certificateUtil.openConvertTool', () => {
-        CertificatePanel.render(context.extensionUri, { type: 'open-tab', initialTab: 'convert' });
+        CertificateOperationsPanel.render(context.extensionUri, { initialTab: 'convert' });
     });
 
     const keystoreToolCommand = vscode.commands.registerCommand('certificateUtil.openKeystoreTool', () => {
-        CertificatePanel.render(context.extensionUri, { type: 'open-tab', initialTab: 'keystore' });
+        CertificateOperationsPanel.render(context.extensionUri, { initialTab: 'keystore' });
     });
 
     const remoteToolCommand = vscode.commands.registerCommand('certificateUtil.openRemoteTool', () => {
@@ -88,6 +92,7 @@ export function activate(context: vscode.ExtensionContext) {
         inspectToolCommand,
         validateToolCommand,
         chainToolCommand,
+        operationsCommand,
         convertToolCommand,
         keystoreToolCommand,
         remoteToolCommand,

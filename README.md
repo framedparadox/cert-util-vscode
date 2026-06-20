@@ -1,6 +1,6 @@
-# Certificate Utility Tools
+# Certificate Utility
 
-Certificate Utility Tools is a VS Code extension for inspecting certificate artifacts without leaving the editor. It provides a compact Activity Bar launcher plus a certificate workbench for local files, pasted bundles, active editor content, PKCS bundles, remote TLS endpoints, and keystore command workflows, alongside the existing expiry scanner.
+Certificate Utility is a VS Code extension for inspecting certificate artifacts without leaving the editor. It provides a compact Activity Bar launcher, certificate inspection and validation tools, dedicated conversion and keystore workflows, and an expiry scanner.
 
 ## Features
 
@@ -8,17 +8,24 @@ Certificate Utility Tools is a VS Code extension for inspecting certificate arti
 
 Open `Certificate Utility: Certificate Tools` from the Command Palette or the Certificates Activity Bar view.
 
-- Inspect pasted PEM content, active editor files, or explicit certificate files.
+- Inspect pasted PEM content or explicit certificate files. The command surface also supports inspecting the active editor directly.
 - Classify X.509 certificates, certificate bundles, CSRs, private keys, PKCS#7 files, PKCS#12 files, and JKS keystores.
 - Decode structured certificate details including subject, issuer, SANs, fingerprints, signature algorithm, public key metadata, key usage, EKU hints, and authority information.
 - Validate validity windows, hostname matching, self-signed status, CA vs leaf usage, and optional trust verification through OpenSSL.
 - Analyze certificate chains and highlight likely leaf, intermediate, and root entries, duplicate serials, and missing issuers.
-- Save the current certificate as PEM or DER.
-- Inspect PKCS#7 and PKCS#12 bundles when OpenSSL is available.
-- Generate Java `keytool` commands for JKS alias export and JKS to PKCS#12 conversion.
-- Generate OpenSSL command instructions for PKCS#12 export from a certificate and private key.
 - Fetch and inspect remote TLS certificate chains using OpenSSL `s_client` when available.
 - Open the `Info` button at the bottom of each tool section to view inline usage guidance, then click it again to collapse the details.
+
+### Conversion & Keystore
+
+Open `Certificate Utility: Certificate Conversion & Keystore` from the Command Palette or the Certificates Activity Bar view.
+
+- Build OpenSSL commands for PEM to DER and DER to PEM conversion from explicit file paths.
+- Inspect PKCS#7 and PKCS#12 bundles when OpenSSL is available.
+- Inspect CSR files.
+- Generate OpenSSL command instructions for PKCS#12 export from a certificate and private key.
+- Generate Java `keytool` commands for JKS alias export and JKS to PKCS#12 conversion.
+- Generate PEM certificate and private-key export commands for JKS, PFX, and PKCS#12 files.
 
 ### Certificate Expiry Checker
 
@@ -56,6 +63,7 @@ The certificate tools workbench also classifies and guides workflows for:
 ## Commands
 
 - `certificateUtil.openCertificateTools`: Certificate Tools
+- `certificateUtil.openCertificateOperations`: Certificate Conversion & Keystore
 - `certificateUtil.inspectActiveCertificate`: Inspect Active Certificate
 - `certificateUtil.inspectCertificateFile`: Inspect Certificate File
 - `certificateUtil.inspectRemoteCertificate`: Inspect Remote Certificate
@@ -81,7 +89,7 @@ npm run lint
 npm run compile
 npm run compile-tests
 npm test
-npx vsce package --no-dependencies --out certificate-util.vsix
+npx vsce package --no-dependencies --out certi.vsix
 ```
 
 ## Privacy

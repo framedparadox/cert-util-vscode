@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 
 suite('extension manifest', () => {
     test('extension should be present', () => {
-        const extension = vscode.extensions.all.find((candidate) => candidate.packageJSON?.name === 'certificate-util');
+        const extension = vscode.extensions.all.find((candidate) => candidate.packageJSON?.name === 'certi');
         assert.ok(extension);
     });
 
@@ -17,6 +17,7 @@ suite('extension manifest', () => {
         const commands = new Set((packageJson.contributes?.commands ?? []).map((entry) => entry.command));
 
         assert.ok(commands.has('certificateUtil.openCertificateTools'));
+        assert.ok(commands.has('certificateUtil.openCertificateOperations'));
         assert.ok(commands.has('certificateUtil.inspectActiveCertificate'));
         assert.ok(commands.has('certificateUtil.inspectCertificateFile'));
         assert.ok(commands.has('certificateUtil.inspectRemoteCertificate'));

@@ -18,9 +18,11 @@ import {
 import {
     buildDerToPemCommand,
     buildJksExportCommand,
+    buildJksPemExportCommands,
     buildJksToPkcs12Command,
     buildPemToDerCommand,
     buildPkcs12ExportCommand,
+    buildPkcs12PemExportCommands,
     parsePkcsCertificateOutput,
     parseRemoteInspectionOutput,
 } from '../certificates/externalTools';
@@ -186,7 +188,9 @@ suite('externalTools helpers', () => {
         assert.ok(buildPemToDerCommand('cert.pem', 'cert.der').includes('openssl x509'));
         assert.ok(buildDerToPemCommand('cert.der', 'cert.pem').includes('openssl x509'));
         assert.ok(buildPkcs12ExportCommand('cert.pem', 'key.pem', 'cert.p12', 'secret').includes('openssl pkcs12'));
+        assert.ok(buildPkcs12PemExportCommands('bundle.p12', 'cert.pem', 'key.pem', 'secret').includes('-nocerts'));
         assert.ok(buildJksExportCommand('keystore.jks', 'server').includes('keytool'));
+        assert.ok(buildJksPemExportCommands('keystore.jks', 'server', 'keystore.p12', 'cert.pem', 'key.pem').includes('keytool'));
         assert.ok(buildJksToPkcs12Command('keystore.jks').includes('PKCS12'));
     });
 

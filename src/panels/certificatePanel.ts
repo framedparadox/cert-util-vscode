@@ -14,16 +14,8 @@ import {
     validateArtifact,
 } from '../certificates/certificateUtils';
 import {
-    buildDerToPemCommand,
-    buildJksExportCommand,
-    buildJksToPkcs12Command,
-    buildPemToDerCommand,
-    buildPkcs12ExportCommand,
     detectExternalToolAvailability,
-    inspectPkcs12File,
-    inspectPkcs7File,
     inspectRemoteCertificate,
-    listJksAliases,
     verifyWithOpenSsl,
 } from '../certificates/externalTools';
 
@@ -34,7 +26,7 @@ interface LaunchRequest {
     remoteTarget?: string;
 }
 
-type ToolTab = 'inspect' | 'validate' | 'chain' | 'convert' | 'keystore' | 'remote';
+type ToolTab = 'inspect' | 'validate' | 'chain' | 'remote';
 
 interface WebviewArtifactCertificate {
     summary: {
@@ -139,12 +131,6 @@ export class CertificatePanel {
                         return;
                     case 'analyzeCurrent':
                         this.handleAnalyzeCurrent();
-                        return;
-                    case 'convertAction':
-                        await this.handleConvertAction(message);
-                        return;
-                    case 'keystoreAction':
-                        await this.handleKeystoreAction(message);
                         return;
                     case 'inspectRemote':
                         await this.handleInspectRemote(message.target);
@@ -297,96 +283,6 @@ export class CertificatePanel {
         });
     }
 
-    private async handleConvertAction(message: {
-        action: string;
-        password?: string;
-        certPath?: string;
-        keyPath?: string;
-        outputPath?: string;
-    }) {
-        try {
-            switch (message.action) {
-                case 'pemToDer':
-                    await this.saveCurrentCertificateAsDer();
-                    return;
-                case 'derToPem':
-                    await this.saveCurrentCertificatePem();
-                    return;
-                case 'inspectPkcs12':
-                    await this.handleInspectExternalBundle('pkcs12', message.outputPath, message.password);
-                    return;
-                case 'inspectPkcs7':
-                    await this.handleInspectExternalBundle('pkcs7', message.outputPath);
-                    return;
-                case 'buildPkcs12':
-                    if (!message.certPath?.trim() || !message.keyPath?.trim()) {
-                        throw new Error('Certificate path and private key path are required.');
-                    }
-                    this.postTextResult('convert', {
-                        title: 'PKCS#12 Export Command',
-                        summary: 'Use this command to build a PKCS#12 bundle from a certificate and private key.',
-                        command: buildPkcs12ExportCommand(
-                            message.certPath.trim(),
-                            message.keyPath.trim(),
-                            message.outputPath?.trim() || 'certificate.p12',
-                            message.password
-                        ),
-                    });
-                    return;
-                case 'inspectCsr':
-                    await this.handleInspectCsr();
-                    return;
-                default:
-                    throw new Error(`Unsupported conversion action: ${message.action}`);
-            }
-        } catch (error) {
-            this.postError('convert', 'Conversion action failed.', error);
-        }
-    }
-
-    private async handleKeystoreAction(message: { action: string; keystorePath?: string; alias?: string; password?: string }) {
-        try {
-            const keystorePath = message.keystorePath?.trim();
-            if (!keystorePath) {
-                throw new Error('Keystore path is required.');
-            }
-
-            switch (message.action) {
-                case 'listAliases': {
-                    const result = listJksAliases(keystorePath, message.password);
-                    this.postTextResult('keystore', {
-                        title: 'JKS Alias Listing',
-                        summary: result.summary,
-                        command: result.command,
-                        body: result.rawOutput,
-                    });
-                    return;
-                }
-                case 'exportCert':
-                    if (!message.alias?.trim()) {
-                        throw new Error('Alias is required to export a certificate.');
-                    }
-                    this.postTextResult('keystore', {
-                        title: 'JKS Export Certificate Command',
-                        summary: 'Run this command to export a PEM certificate from the JKS keystore.',
-                        command: buildJksExportCommand(keystorePath, message.alias.trim()),
-                    });
-                    return;
-                case 'convertToPkcs12':
-                    this.postTextResult('keystore', {
-                        title: 'JKS to PKCS#12 Command',
-                        summary: 'Run this command to convert the JKS keystore to a PKCS#12 bundle.',
-                        command: buildJksToPkcs12Command(keystorePath),
-                    });
-                    return;
-                default:
-                    throw new Error(`Unsupported keystore action: ${message.action}`);
-            }
-        } catch (error) {
-            this.postError('keystore', 'Keystore action failed.', error);
-        }
-    }
-
     private async handleInspectRemote(target: string) {
         try {
             const result = inspectRemoteCertificate(target);
@@ -438,118 +334,6 @@ export class CertificatePanel {
             kind: 'active-editor',
             label: `Active editor: ${document.fileName || document.uri.toString()}`,
         });
-    }
-
-    private async saveCurrentCertificateAsDer() {
-        const certificate = this.requireCurrentCertificate();
-        const target = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', 'certificate.der')),
-            filters: {
-                DER: ['der'],
-            },
-        });
-        if (!target) {
-            return;
-        }
-
-        await vscode.workspace.fs.writeFile(target, Buffer.from(certificate.raw.pemToDerBuffer ?? Buffer.alloc(0)));
-        const command = this.currentArtifact?.filePath
-            ? buildPemToDerCommand(this.currentArtifact.filePath, target.fsPath)
-            : undefined;
-        this.postTextResult('convert', {
-            title: 'Saved DER Certificate',
-            summary: `The first certificate in the current artifact was saved to ${target.fsPath}.`,
-            command,
-        });
-    }
-
-    private async saveCurrentCertificatePem() {
-        const certificate = this.requireCurrentCertificate();
-        const target = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', 'certificate.pem')),
-            filters: {
-                PEM: ['pem', 'crt', 'cer'],
-            },
-        });
-        if (!target) {
-            return;
-        }
-
-        await vscode.workspace.fs.writeFile(target, Buffer.from(certificate.raw.pem, 'utf8'));
-        const command =
-            this.currentArtifact?.filePath && this.currentArtifact.encoding === 'DER'
-                ? buildDerToPemCommand(this.currentArtifact.filePath, target.fsPath)
-                : undefined;
-        this.postTextResult('convert', {
-            title: 'Saved PEM Certificate',
-            summary: `The first certificate in the current artifact was saved to ${target.fsPath}.`,
-            command,
-        });
-    }
-
-    private async handleInspectExternalBundle(kind: 'pkcs12' | 'pkcs7', candidatePath?: string, password?: string) {
-        const filePath = candidatePath?.trim() || this.currentArtifact?.filePath;
-        if (!filePath) {
-            throw new Error('Choose a file to inspect first.');
-        }
-
-        const result = kind === 'pkcs12' ? inspectPkcs12File(filePath, password) : inspectPkcs7File(filePath);
-        const payload = {
-            title: kind === 'pkcs12' ? 'PKCS#12 Inspection' : 'PKCS#7 Inspection',
-            summary: result.summary,
-            command: result.command,
-            body: result.rawOutput,
-            warnings: result.warnings,
-            artifact: result.certificates?.length
-                ? this.serializeArtifact(
-                      parseCertificateInputFromText(
-                          result.certificates.map((certificate) => certificate.pem).join('\n'),
-                          {
-                              kind: 'file',
-                              label: path.basename(filePath),
-                              filePath,
-                          }
-                      )
-                  )
-                : undefined,
-        };
-
-        this.panel.webview.postMessage({
-            command: 'convertResult',
-            payload,
-        });
-    }
-
-    private async handleInspectCsr() {
-        if (!this.currentArtifact) {
-            throw new Error('Inspect a CSR file or paste CSR content first.');
-        }
-
-        if (this.currentArtifact.kind !== 'csr') {
-            throw new Error('The current artifact is not a CSR.');
-        }
-
-        this.postTextResult('convert', {
-            title: 'CSR Inspection',
-            summary: 'The current artifact is classified as a certificate signing request.',
-            body: this.currentArtifact.rawText || this.currentArtifact.blockTypes.join(', '),
-        });
-    }
-
-    private requireCurrentCertificate(): {
-        raw: { pem: string; pemToDerBuffer: Buffer };
-    } {
-        const certificate = this.currentArtifact?.certificates[0];
-        if (!certificate) {
-            throw new Error('No certificate is loaded.');
-        }
-
-        return {
-            raw: {
-                pem: certificate.pem,
-                pemToDerBuffer: new crypto.X509Certificate(certificate.pem).raw,
-            },
-        };
     }
 
     private postCapabilities() {
@@ -674,22 +458,6 @@ export class CertificatePanel {
         };
     }
 
-    private postTextResult(
-        tab: 'convert' | 'keystore',
-        payload: {
-            title: string;
-            summary: string;
-            command?: string;
-            body?: string;
-            warnings?: string[];
-        }
-    ) {
-        this.panel.webview.postMessage({
-            command: tab === 'convert' ? 'convertResult' : 'keystoreResult',
-            payload,
-        });
-    }
-
     private postError(tab: string, summary: string, error: unknown) {
         const detail = error instanceof Error ? error.message : String(error);
         this.panel.webview.postMessage({
@@ -741,7 +509,7 @@ export class CertificatePanel {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 12px;
-            margin-bottom: 18px;
+            margin-top: 12px;
         }
         .capability,
         .panel,
@@ -843,6 +611,9 @@ export class CertificatePanel {
         .result-panel {
             margin-top: 14px;
         }
+        .result-panel:empty {
+            display: none;
+        }
         .result-panel h3 {
             margin-top: 0;
             margin-bottom: 10px;
@@ -860,19 +631,41 @@ export class CertificatePanel {
             padding: 0;
             list-style: none;
         }
+        .badge,
         .chip,
         .issue {
-            padding: 5px 8px;
-            border-radius: 999px;
-            font-size: 12px;
-            background: var(--vscode-badge-background);
-            color: var(--vscode-badge-foreground);
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            border-radius: 12px;
+            border: 1px solid;
         }
-        .issue.error {
-            background: color-mix(in srgb, var(--vscode-errorForeground) 20%, transparent);
+        .badge.valid,
+        .issue.valid,
+        .issue.info {
+            background-color: rgba(76, 175, 80, 0.1);
+            color: #4caf50;
+            border-color: #4caf50;
         }
+        .badge.expiring,
         .issue.warning {
-            background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 20%, transparent);
+            background-color: rgba(255, 152, 0, 0.1);
+            color: #ff9800;
+            border-color: #ff9800;
+        }
+        .badge.expired,
+        .issue.error {
+            background-color: rgba(244, 67, 54, 0.1);
+            color: #f44336;
+            border-color: #f44336;
+        }
+        .badge-icon {
+            width: 12px;
+            height: 12px;
+            flex: 0 0 auto;
         }
         .section-card {
             border: 1px solid var(--vscode-panel-border);
@@ -934,45 +727,32 @@ export class CertificatePanel {
 </head>
 <body>
     <h1>Certificate Tools</h1>
-    <p class="lead">Inspect certificates and bundles, validate hostname and purpose, analyze chains, inspect PKCS#7 and PKCS#12 artifacts, build keystore commands, and fetch remote TLS certificates without leaving VS Code.</p>
-
-    <div class="capabilities" id="capabilities"></div>
+    <p class="lead">Inspect certificates and bundles, validate hostname and purpose, analyze chains, and fetch remote TLS certificates without leaving VS Code.</p>
 
     <div class="tabs">
         <button class="tab active" data-tab="inspect">Inspect</button>
         <button class="tab" data-tab="validate">Validate</button>
         <button class="tab" data-tab="chain">Chain</button>
-        <button class="tab" data-tab="convert">Convert</button>
-        <button class="tab" data-tab="keystore">Keystore</button>
         <button class="tab" data-tab="remote">Remote</button>
     </div>
 
     <section class="tab-content active" id="inspect">
         <div class="panel">
             <div class="grid">
-                <div class="field">
-                    <label for="inspect-source-mode">Input Source</label>
-                    <select id="inspect-source-mode">
-                        <option value="paste">Pasted Content</option>
-                        <option value="active">Active Editor</option>
-                        <option value="file">File Path</option>
-                    </select>
-                </div>
                 <div class="field-wide">
                     <label for="inspect-file-path">Certificate File</label>
                     <input id="inspect-file-path" type="text" placeholder="/path/to/certificate.crt or bundle.p12">
                     <div class="actions">
                         <button class="secondary" data-pick-target="inspect-file-path" data-pick-kind="file">Choose File</button>
-                        <button class="ghost" id="load-active-btn">Use Active Editor</button>
                     </div>
                 </div>
                 <div class="field-wide">
-                    <label for="inspect-text">Pasted Certificate, Bundle, CSR, or Key</label>
+                    <label for="inspect-text">Certificate, Bundle, CSR, or Key</label>
                     <textarea id="inspect-text" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
                 </div>
             </div>
             <div class="actions">
-                <button id="inspect-btn">Inspect Artifact</button>
+                <button id="inspect-btn">Inspect</button>
                 <button class="secondary" id="clear-inspect-btn">Clear</button>
             </div>
         </div>
@@ -981,12 +761,13 @@ export class CertificatePanel {
             <button class="ghost info-toggle" data-doc-target="inspect-docs">Info</button>
             <div class="doc-panel" id="inspect-docs" hidden>
                 <h4>Inspect Tool Details</h4>
-                <p>Use this tool to classify the current artifact before you try validation or conversion. It accepts pasted text, a picked file, or the active editor.</p>
+                <p>Use this tool to classify the current artifact before validation or chain analysis. It accepts pasted text or a picked file.</p>
                 <ul>
                     <li>Best for PEM, DER, certificate bundles, CSRs, private keys, PKCS#7, PKCS#12, and JKS detection.</li>
                     <li>Structured output shows subject, issuer, SANs, usage, fingerprints, and raw PEM or JSON views.</li>
                     <li>If a bundle contains multiple certificates, each entry is shown separately and chain warnings are surfaced below the result.</li>
                 </ul>
+                <div class="capabilities" id="capabilities"></div>
             </div>
         </div>
     </section>
@@ -1064,103 +845,6 @@ export class CertificatePanel {
         </div>
     </section>
 
-    <section class="tab-content" id="convert">
-        <div class="panel">
-            <div class="grid">
-                <div class="field">
-                    <label for="convert-bundle-path">Bundle File Path</label>
-                    <input id="convert-bundle-path" type="text" placeholder="/path/to/bundle.p12 or bundle.p7b">
-                    <div class="actions">
-                        <button class="secondary" data-pick-target="convert-bundle-path" data-pick-kind="file">Choose Bundle File</button>
-                    </div>
-                </div>
-                <div class="field">
-                    <label for="convert-password">Bundle Password (optional)</label>
-                    <input id="convert-password" type="password" placeholder="PKCS#12 password">
-                </div>
-                <div class="field">
-                    <label for="convert-cert-path">Certificate Path</label>
-                    <input id="convert-cert-path" type="text" placeholder="/path/to/certificate.crt">
-                    <div class="actions">
-                        <button class="secondary" data-pick-target="convert-cert-path" data-pick-kind="file">Choose Certificate</button>
-                    </div>
-                </div>
-                <div class="field">
-                    <label for="convert-key-path">Private Key Path</label>
-                    <input id="convert-key-path" type="text" placeholder="/path/to/private.key">
-                    <div class="actions">
-                        <button class="secondary" data-pick-target="convert-key-path" data-pick-kind="file">Choose Key</button>
-                    </div>
-                </div>
-                <div class="field">
-                    <label for="convert-output-path">Output Path</label>
-                    <input id="convert-output-path" type="text" placeholder="certificate.p12">
-                </div>
-            </div>
-            <div class="actions">
-                <button id="pem-to-der-btn">Save Current as DER</button>
-                <button class="secondary" id="der-to-pem-btn">Save Current as PEM</button>
-                <button class="secondary" id="inspect-pkcs12-btn">Inspect PKCS#12</button>
-                <button class="secondary" id="inspect-pkcs7-btn">Inspect PKCS#7</button>
-                <button class="secondary" id="inspect-csr-btn">Inspect CSR</button>
-                <button class="ghost" id="build-pkcs12-btn">Build PKCS#12 Command</button>
-            </div>
-        </div>
-        <div class="result-panel" id="convert-result"></div>
-        <div class="info-footer">
-            <button class="ghost info-toggle" data-doc-target="convert-docs">Info</button>
-            <div class="doc-panel" id="convert-docs" hidden>
-                <h4>Convert Tool Details</h4>
-                <p>This section mixes local save actions with external-tool inspection and command generation.</p>
-                <ul>
-                    <li>Save the current certificate as PEM or DER after inspection.</li>
-                    <li>Inspect PKCS#7 and PKCS#12 bundles through OpenSSL when it is available.</li>
-                    <li>Build an OpenSSL PKCS#12 export command from a certificate path and private key path without storing key material in the extension.</li>
-                </ul>
-            </div>
-        </div>
-    </section>
-
-    <section class="tab-content" id="keystore">
-        <div class="panel">
-            <div class="grid">
-                <div class="field-wide">
-                    <label for="keystore-path">JKS Keystore Path</label>
-                    <input id="keystore-path" type="text" placeholder="/path/to/keystore.jks">
-                    <div class="actions">
-                        <button class="secondary" data-pick-target="keystore-path" data-pick-kind="file">Choose Keystore</button>
-                    </div>
-                </div>
-                <div class="field">
-                    <label for="keystore-alias">Alias</label>
-                    <input id="keystore-alias" type="text" placeholder="certificate-alias">
-                </div>
-                <div class="field">
-                    <label for="keystore-password">Store Password (optional)</label>
-                    <input id="keystore-password" type="password">
-                </div>
-            </div>
-            <div class="actions">
-                <button id="jks-list-btn">List Aliases</button>
-                <button class="secondary" id="jks-export-btn">Export Cert Command</button>
-                <button class="secondary" id="jks-convert-btn">Convert to PKCS#12 Command</button>
-            </div>
-        </div>
-        <div class="result-panel" id="keystore-result"></div>
-        <div class="info-footer">
-            <button class="ghost info-toggle" data-doc-target="keystore-docs">Info</button>
-            <div class="doc-panel" id="keystore-docs" hidden>
-                <h4>Keystore Tool Details</h4>
-                <p>This section is intentionally command-oriented because JKS handling depends on Java keytool rather than Node.js certificate parsing.</p>
-                <ul>
-                    <li>List aliases when keytool is available.</li>
-                    <li>Generate export and JKS-to-PKCS#12 conversion commands even when keytool is missing.</li>
-                    <li>Use the alias export command to extract a PEM certificate that can then be inspected in the Inspect tool.</li>
-                </ul>
-            </div>
-        </div>
-    </section>
-
     <section class="tab-content" id="remote">
         <div class="panel">
             <div class="grid">
@@ -1230,11 +914,38 @@ export class CertificatePanel {
                 .join('');
         }
 
+        function renderStatusPill(kind, text) {
+            const config = {
+                valid: {
+                    className: 'valid',
+                    icon: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>'
+                },
+                warning: {
+                    className: 'expiring',
+                    icon: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>'
+                },
+                error: {
+                    className: 'expired',
+                    icon: '<circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line>'
+                }
+            };
+            const status = config[kind] || config.warning;
+            return '<span class="badge ' + status.className + '">' +
+                '<svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' + status.icon + '</svg>' +
+                escapeHtml(text) +
+            '</span>';
+        }
+
+        function renderIssuePill(issue) {
+            const kind = issue.severity === 'error' ? 'error' : (issue.severity === 'warning' ? 'warning' : 'valid');
+            return '<li>' + renderStatusPill(kind, issue.message) + '</li>';
+        }
+
         function renderArtifact(hostId, payload) {
             const host = document.getElementById(hostId);
             const warnings = payload.warnings.length
                 ? '<div class="section-card"><h4>Warnings</h4><ul class="warning-list">' +
-                    payload.warnings.map((warning) => '<li class="issue warning">' + escapeHtml(warning) + '</li>').join('') +
+                    payload.warnings.map((warning) => '<li>' + renderStatusPill('warning', warning) + '</li>').join('') +
                     '</ul></div>'
                 : '';
 
@@ -1311,7 +1022,7 @@ export class CertificatePanel {
                 '</div>'
             ).join('');
             const warnings = chain.warnings.length
-                ? '<ul class="warning-list">' + chain.warnings.map((warning) => '<li class="issue warning">' + escapeHtml(warning) + '</li>').join('') + '</ul>'
+                ? '<ul class="warning-list">' + chain.warnings.map((warning) => '<li>' + renderStatusPill('warning', warning) + '</li>').join('') + '</ul>'
                 : '<p class="muted">No chain warnings.</p>';
             return '<div class="section-card"><h4>Chain Analysis</h4>' +
                 '<p class="muted">Leaf index: ' + escapeHtml(String(chain.leafIndex ?? 'n/a')) + ' · Root index: ' + escapeHtml(String(chain.rootIndex ?? 'n/a')) + '</p>' +
@@ -1323,11 +1034,16 @@ export class CertificatePanel {
         function renderValidation(payload) {
             const host = document.getElementById('validate-result');
             const commandKey = payload.command ? stashCopy(payload.command) : undefined;
+            const statusKind = payload.valid ? 'valid' : 'error';
+            const issues = payload.issues.length
+                ? payload.issues.map((issue) => renderIssuePill(issue)).join('')
+                : '<li>' + renderStatusPill('valid', 'Valid') + '</li>';
             host.innerHTML =
                 '<h3>Validation Result</h3>' +
+                renderStatusPill(statusKind, payload.valid ? 'Valid' : 'Error') +
                 '<p class="muted">' + escapeHtml(payload.summary) + '</p>' +
                 '<ul class="issue-list">' +
-                payload.issues.map((issue) => '<li class="issue ' + escapeHtml(issue.severity) + '">' + escapeHtml(issue.message) + '</li>').join('') +
+                issues +
                 '</ul>' +
                 (payload.command ? '<div class="section-card"><h4>OpenSSL Command</h4><pre>' + escapeHtml(payload.command) + '</pre><div class="actions"><button class="secondary" data-copy-key="' + commandKey + '">Copy Command</button></div></div>' : '') +
                 (payload.rawOutput ? '<div class="section-card"><h4>Verifier Output</h4><pre>' + escapeHtml(payload.rawOutput) + '</pre></div>' : '');
@@ -1338,30 +1054,12 @@ export class CertificatePanel {
             host.innerHTML = payload ? '<h3>Chain Result</h3>' + renderChainCard(payload) : '<h3>Chain Result</h3><p class="muted">No chain data is available.</p>';
         }
 
-        function renderTextResult(hostId, payload, title) {
-            const host = document.getElementById(hostId);
-            const commandKey = payload.command ? stashCopy(payload.command) : undefined;
-            const bodyKey = payload.body ? stashCopy(payload.body) : undefined;
-            host.innerHTML =
-                '<h3>' + escapeHtml(title) + '</h3>' +
-                '<p class="muted">' + escapeHtml(payload.summary) + '</p>' +
-                (payload.warnings && payload.warnings.length
-                    ? '<ul class="warning-list">' + payload.warnings.map((warning) => '<li class="issue warning">' + escapeHtml(warning) + '</li>').join('') + '</ul>'
-                    : '') +
-                (payload.command ? '<div class="section-card"><h4>Command</h4><pre>' + escapeHtml(payload.command) + '</pre><div class="actions"><button class="secondary" data-copy-key="' + commandKey + '">Copy Command</button></div></div>' : '') +
-                (payload.body ? '<div class="section-card"><h4>Output</h4><pre>' + escapeHtml(payload.body) + '</pre><div class="actions"><button class="secondary" data-copy-key="' + bodyKey + '">Copy Output</button></div></div>' : '') +
-                (payload.artifact ? '<div class="section-card"><h4>Extracted Certificates</h4></div>' : '');
-            if (payload.artifact) {
-                renderArtifact(hostId, payload.artifact);
-            }
-        }
-
         function showError(payload) {
             const host = document.getElementById(payload.tab + '-result');
             if (!host) {
                 return;
             }
-            host.innerHTML = '<h3>Error</h3><p class="issue error">' + escapeHtml(payload.summary) + '</p><pre>' + escapeHtml(payload.detail) + '</pre>';
+            host.innerHTML = '<h3>Error</h3>' + renderStatusPill('error', payload.summary) + '<pre>' + escapeHtml(payload.detail) + '</pre>';
         }
 
         document.querySelectorAll('.tab').forEach((tab) => {
@@ -1424,16 +1122,14 @@ export class CertificatePanel {
             }
         });
 
-        document.getElementById('load-active-btn').addEventListener('click', () => {
-            document.getElementById('inspect-source-mode').value = 'active';
-        });
-
         document.getElementById('inspect-btn').addEventListener('click', () => {
+            const filePath = document.getElementById('inspect-file-path').value;
+            const text = document.getElementById('inspect-text').value;
             vscode.postMessage({
                 command: 'inspectSource',
-                sourceMode: document.getElementById('inspect-source-mode').value,
-                text: document.getElementById('inspect-text').value,
-                filePath: document.getElementById('inspect-file-path').value,
+                sourceMode: filePath.trim() ? 'file' : 'paste',
+                text,
+                filePath,
             });
         });
 
@@ -1455,65 +1151,6 @@ export class CertificatePanel {
 
         document.getElementById('chain-btn').addEventListener('click', () => {
             vscode.postMessage({ command: 'analyzeCurrent' });
-        });
-
-        document.getElementById('pem-to-der-btn').addEventListener('click', () => {
-            vscode.postMessage({ command: 'convertAction', action: 'pemToDer' });
-        });
-        document.getElementById('der-to-pem-btn').addEventListener('click', () => {
-            vscode.postMessage({ command: 'convertAction', action: 'derToPem' });
-        });
-        document.getElementById('inspect-pkcs12-btn').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'convertAction',
-                action: 'inspectPkcs12',
-                outputPath: document.getElementById('convert-bundle-path').value,
-                password: document.getElementById('convert-password').value,
-            });
-        });
-        document.getElementById('inspect-pkcs7-btn').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'convertAction',
-                action: 'inspectPkcs7',
-                outputPath: document.getElementById('convert-bundle-path').value,
-            });
-        });
-        document.getElementById('inspect-csr-btn').addEventListener('click', () => {
-            vscode.postMessage({ command: 'convertAction', action: 'inspectCsr' });
-        });
-        document.getElementById('build-pkcs12-btn').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'convertAction',
-                action: 'buildPkcs12',
-                certPath: document.getElementById('convert-cert-path').value,
-                keyPath: document.getElementById('convert-key-path').value,
-                outputPath: document.getElementById('convert-output-path').value,
-                password: document.getElementById('convert-password').value,
-            });
-        });
-
-        document.getElementById('jks-list-btn').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'keystoreAction',
-                action: 'listAliases',
-                keystorePath: document.getElementById('keystore-path').value,
-                password: document.getElementById('keystore-password').value,
-            });
-        });
-        document.getElementById('jks-export-btn').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'keystoreAction',
-                action: 'exportCert',
-                keystorePath: document.getElementById('keystore-path').value,
-                alias: document.getElementById('keystore-alias').value,
-            });
-        });
-        document.getElementById('jks-convert-btn').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'keystoreAction',
-                action: 'convertToPkcs12',
-                keystorePath: document.getElementById('keystore-path').value,
-            });
         });
 
         document.getElementById('remote-inspect-btn').addEventListener('click', () => {
@@ -1546,14 +1183,6 @@ export class CertificatePanel {
                 case 'chainResult':
                     setActiveTab('chain');
                     renderChain(message.payload);
-                    return;
-                case 'convertResult':
-                    setActiveTab('convert');
-                    renderTextResult('convert-result', message.payload, 'Conversion Result');
-                    return;
-                case 'keystoreResult':
-                    setActiveTab('keystore');
-                    renderTextResult('keystore-result', message.payload, 'Keystore Result');
                     return;
                 case 'remoteResult':
                     setActiveTab('remote');

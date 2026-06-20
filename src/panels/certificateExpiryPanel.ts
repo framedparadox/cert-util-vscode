@@ -205,10 +205,15 @@ export class CertificateExpiryPanel {
         h1 {
             font-size: 24px;
             font-weight: 600;
-            margin-bottom: 24px;
+            margin-bottom: 8px;
             display: flex;
             align-items: center;
             gap: 12px;
+        }
+
+        .lead {
+            margin-bottom: 24px;
+            color: var(--vscode-descriptionForeground);
         }
 
         .calendar-icon {
@@ -432,6 +437,7 @@ export class CertificateExpiryPanel {
         </svg>
         Certificate Expiry Checker
     </h1>
+    <p class="lead">Scan certificate folders to quickly find valid, expiring, and expired certificates before they disrupt dependent services.</p>
 
     <div class="card">
         <div class="card-title">Scan Folder for Certificates</div>

@@ -229,6 +229,28 @@ export function buildPkcs12ExportCommand(certPath: string, keyPath: string, outp
     return buildOpenSslCommand(args);
 }
 
+export function buildPkcs12PemExportCommands(
+    filePath: string,
+    certificateOutputPath: string,
+    keyOutputPath: string,
+    password?: string
+): string {
+    const passwordArgs = password ? ['-passin', `pass:${password}`] : [];
+    return [
+        buildOpenSslCommand([
+            'pkcs12',
+            '-in',
+            filePath,
+            ...passwordArgs,
+            '-clcerts',
+            '-nokeys',
+            '-out',
+            certificateOutputPath,
+        ]),
+        buildOpenSslCommand(['pkcs12', '-in', filePath, ...passwordArgs, '-nocerts', '-nodes', '-out', keyOutputPath]),
+    ].join('\n');
+}
+
 export function listJksAliases(filePath: string, password?: string): { summary: string; command: string; rawOutput: string } {
     const availability = detectExternalToolAvailability();
     const args = ['-list', '-keystore', filePath];
@@ -258,6 +280,37 @@ export function buildJksExportCommand(filePath: string, alias: string): string {
 
 export function buildJksToPkcs12Command(filePath: string): string {
     return buildKeytoolCommand(['-importkeystore', '-srckeystore', filePath, '-destkeystore', 'keystore.p12', '-deststoretype', 'PKCS12']);
+}
+
+export function buildJksPemExportCommands(
+    filePath: string,
+    alias: string,
+    pkcs12OutputPath: string,
+    certificateOutputPath: string,
+    keyOutputPath: string,
+    password?: string
+): string {
+    const args = [
+        '-importkeystore',
+        '-srckeystore',
+        filePath,
+        '-srcalias',
+        alias,
+        '-destkeystore',
+        pkcs12OutputPath,
+        '-deststoretype',
+        'PKCS12',
+        '-destalias',
+        alias,
+    ];
+    if (password) {
+        args.push('-srcstorepass', password, '-deststorepass', password);
+    }
+
+    return [
+        buildKeytoolCommand(args),
+        buildPkcs12PemExportCommands(pkcs12OutputPath, certificateOutputPath, keyOutputPath, password),
+    ].join('\n');
 }
 
 function detectCommandVersion(command: string, args: string[]): { available: boolean; version?: string; error?: string } {

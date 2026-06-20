@@ -11,9 +11,15 @@ interface CertificateToolItem {
 const CERTIFICATE_TOOLS: CertificateToolItem[] = [
     {
         label: 'Certificate Tools',
-        description: 'Inspect, validate, analyze, convert, and inspect remote certificates',
+        description: 'Inspect, validate, analyze, and fetch remote certificates',
         command: 'certificateUtil.openCertificateTools',
         icon: 'certificate.svg',
+    },
+    {
+        label: 'Conversion & Keystore',
+        description: 'Convert certificate formats and build JKS, PFX, and PKCS#12 export commands',
+        command: 'certificateUtil.openCertificateOperations',
+        icon: 'conversion-keystore.svg',
     },
     {
         label: 'Expiry Checker',
