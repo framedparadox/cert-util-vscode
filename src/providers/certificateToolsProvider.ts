@@ -112,7 +112,7 @@ export class CertificateToolsProvider implements vscode.WebviewViewProvider {
         color: inherit;
         cursor: pointer;
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         gap: 10px;
         text-align: left;
         font: inherit;
@@ -131,7 +131,6 @@ export class CertificateToolsProvider implements vscode.WebviewViewProvider {
         width: 24px;
         height: 24px;
         flex: 0 0 auto;
-        margin-top: 1px;
     }
 
     .tool-copy {

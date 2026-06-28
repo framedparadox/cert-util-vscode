@@ -384,8 +384,17 @@ function normalizeRemoteTarget(target: string): { host: string; port: number } {
         throw new Error('Remote target is required.');
     }
 
+    // IPv6 bracketed address: [::1]:443 or [::1] (no port).
+    const ipv6Match = trimmed.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    if (ipv6Match) {
+        const host = ipv6Match[1];
+        const port = ipv6Match[2] ? Number.parseInt(ipv6Match[2], 10) : 443;
+        return { host, port };
+    }
+
+    // Plain host:port or bare hostname / IPv4.
     const lastColonIndex = trimmed.lastIndexOf(':');
-    if (lastColonIndex > -1 && trimmed.indexOf(']') === -1) {
+    if (lastColonIndex > -1) {
         const host = trimmed.slice(0, lastColonIndex);
         const port = Number.parseInt(trimmed.slice(lastColonIndex + 1), 10);
         if (Number.isInteger(port) && port > 0) {

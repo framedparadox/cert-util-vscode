@@ -242,7 +242,7 @@ export function parseCertificateInputFromFile(filePath: string, sourceKind: Cert
 export function validateArtifact(artifact: ParsedCertificateArtifact, options: ValidationOptions = {}): CertificateValidationResult {
     if (!artifact.certificates.length) {
         return {
-            status: 'expired',
+            status: 'valid',
             valid: false,
             summary: 'No X.509 certificates available to validate.',
             issues: [
@@ -733,9 +733,14 @@ function splitMultilineField(value: string): string[] {
 }
 
 function extractInfoAccessValues(value: string, prefix: string): string[] {
+    const separator = ' - ';
+    const lowerPrefix = prefix.toLowerCase();
     return splitMultilineField(value)
-        .filter((entry) => entry.toLowerCase().startsWith(prefix.toLowerCase()))
-        .map((entry) => entry.split('-').slice(1).join('-').trim())
+        .filter((entry) => entry.toLowerCase().startsWith(lowerPrefix))
+        .map((entry) => {
+            const sepIndex = entry.indexOf(separator);
+            return sepIndex !== -1 ? entry.slice(sepIndex + separator.length).trim() : '';
+        })
         .filter((entry) => entry.length > 0);
 }
 
