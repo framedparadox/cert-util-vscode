@@ -97,7 +97,7 @@ interface WebviewChainPayload {
 }
 
 export class CertificatePanel {
-    public static currentPanel: CertificatePanel | undefined;
+    private static currentPanel: CertificatePanel | undefined;
 
     private readonly panel: vscode.WebviewPanel;
     private readonly disposables: vscode.Disposable[] = [];
@@ -209,6 +209,9 @@ export class CertificatePanel {
                     if (!message.text?.trim()) {
                         throw new Error('Paste certificate content to inspect.');
                     }
+                    if (message.text.length > 524288) {
+                        throw new Error('Pasted content exceeds the 512 KB limit. Use a file path instead.');
+                    }
                     artifact = parseCertificateInputFromText(message.text, {
                         kind: 'pasted',
                         label: 'Pasted input',
@@ -257,12 +260,15 @@ export class CertificatePanel {
             }
         }
 
+        const valid = !issues.some((issue) => issue.severity === 'error');
         this.panel.webview.postMessage({
             command: 'validationResult',
             payload: {
                 status: validation.status,
-                valid: !issues.some((issue) => issue.severity === 'error'),
-                summary: validation.summary,
+                valid,
+                // Recompute summary to reflect any additional issues (e.g. from OpenSSL trust
+                // verification) that were added after the initial validateArtifact call.
+                summary: valid ? 'Certificate validation passed with no errors.' : 'Certificate validation detected one or more errors.',
                 issues,
                 command,
                 rawOutput,
@@ -473,7 +479,7 @@ export class CertificatePanel {
     private getWebviewContent(): string {
         const webview = this.panel.webview;
         const nonce = crypto.randomBytes(16).toString('base64url');
-        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -482,7 +488,7 @@ export class CertificatePanel {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="${csp}">
     <title>Certificate Tools</title>
-    <style>
+    <style nonce="${nonce}">
         :root {
             color-scheme: light dark;
         }
@@ -748,7 +754,7 @@ export class CertificatePanel {
                 </div>
                 <div class="field-wide">
                     <label for="inspect-text">Certificate, Bundle, CSR, or Key</label>
-                    <textarea id="inspect-text" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                    <textarea id="inspect-text" maxlength="524288" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
                 </div>
             </div>
             <div class="actions">
@@ -877,6 +883,13 @@ export class CertificatePanel {
         const copyStore = new Map();
         let copyId = 0;
 
+        // Prune stale copy-store entries whenever a result panel is re-rendered so the
+        // Map does not grow without bound across many inspect/validate cycles.
+        function clearCopyStore() {
+            copyStore.clear();
+            copyId = 0;
+        }
+
         function setActiveTab(tabName) {
             document.querySelectorAll('.tab').forEach((tab) => {
                 tab.classList.toggle('active', tab.dataset.tab === tabName);
@@ -942,6 +955,7 @@ export class CertificatePanel {
         }
 
         function renderArtifact(hostId, payload) {
+            clearCopyStore();
             const host = document.getElementById(hostId);
             const warnings = payload.warnings.length
                 ? '<div class="section-card"><h4>Warnings</h4><ul class="warning-list">' +
@@ -1032,6 +1046,7 @@ export class CertificatePanel {
         }
 
         function renderValidation(payload) {
+            clearCopyStore();
             const host = document.getElementById('validate-result');
             const commandKey = payload.command ? stashCopy(payload.command) : undefined;
             const statusKind = payload.valid ? 'valid' : 'error';

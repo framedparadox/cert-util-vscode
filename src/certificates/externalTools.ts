@@ -7,7 +7,6 @@ import {
     ParsedCertificateArtifact,
     ParsedCertificateDetails,
     ValidationIssue,
-    analyzeCertificateChain,
     parseCertificateInputFromFile,
     parseCertificateInputFromText,
 } from './certificateUtils';
@@ -34,10 +33,21 @@ export interface RemoteInspectionResult {
     rawOutput: string;
 }
 
+/**
+ * Name of the password file referenced in generated command recipes.
+ * Using a file reference keeps the secret out of the displayed command string and shell history.
+ */
+const RECIPE_PASS_FILE = 'passfile.txt';
+
+/** How long (ms) the external-tool availability result is cached before re-probing. */
+const TOOL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 let toolAvailabilityCache: ExternalToolAvailability | undefined;
+let toolAvailabilityCacheTime = 0;
 
 export function detectExternalToolAvailability(forceRefresh = false): ExternalToolAvailability {
-    if (!forceRefresh && toolAvailabilityCache) {
+    const now = Date.now();
+    if (!forceRefresh && toolAvailabilityCache && now - toolAvailabilityCacheTime < TOOL_CACHE_TTL_MS) {
         return toolAvailabilityCache;
     }
 
@@ -45,23 +55,26 @@ export function detectExternalToolAvailability(forceRefresh = false): ExternalTo
         openssl: detectCommandVersion('openssl', ['version']),
         keytool: detectCommandVersion('keytool', ['-J-version']),
     };
+    toolAvailabilityCacheTime = now;
     return toolAvailabilityCache;
 }
 
 export function inspectPkcs12File(filePath: string, password?: string): PkcsInspectionResult {
     const availability = detectExternalToolAvailability();
+    const displayArgs = ['pkcs12', '-info', '-in', filePath];
     if (!availability.openssl.available) {
         return {
             summary: 'OpenSSL is not available. PKCS#12 inspection is limited to command recipes.',
-            command: buildOpenSslCommand(['pkcs12', '-info', '-in', filePath]),
+            command: buildOpenSslCommand(displayArgs),
             warnings: ['OpenSSL is not available on this machine.'],
             rawOutput: '',
         };
     }
 
-    const passArg = password ? `pass:${password}` : 'pass:';
-    const commandArgs = ['pkcs12', '-in', filePath, '-nodes', '-nokeys', '-passin', passArg];
-    const result = runCommand('openssl', commandArgs);
+    // Pass the password through stdin so it does not appear in the process listing visible
+    // to other users on the machine (e.g. via `ps aux` or /proc/<pid>/cmdline).
+    const commandArgs = ['pkcs12', '-in', filePath, '-nodes', '-nokeys', '-passin', 'stdin'];
+    const result = runCommand('openssl', commandArgs, password ?? '');
     const artifact = result.ok
         ? parseCertificateInputFromText(result.stdout, {
               kind: 'file',
@@ -124,6 +137,8 @@ export function inspectRemoteCertificate(target: string): RemoteInspectionResult
         throw new Error(result.stderr || 'OpenSSL s_client failed.');
     }
 
+    // parseCertificateInputFromText always runs analyzeCertificateChain when certificates are
+    // found, so artifact.chain is already populated — no need to recompute it here.
     const artifact = parseCertificateInputFromText(result.stdout, {
         kind: 'remote',
         label: `${host}:${port}`,
@@ -131,10 +146,7 @@ export function inspectRemoteCertificate(target: string): RemoteInspectionResult
     });
 
     return {
-        artifact: {
-            ...artifact,
-            chain: artifact.chain ?? analyzeCertificateChain(artifact.certificates),
-        },
+        artifact,
         command: result.command,
         warnings: artifact.warnings,
         rawOutput: result.stdout,
@@ -182,8 +194,13 @@ export function verifyWithOpenSsl(
     }
     args.push(leafFile);
 
-    const result = runCommand('openssl', args);
-    fs.rmSync(tempDirectory, { recursive: true, force: true });
+    let result: CommandResult;
+    try {
+        result = runCommand('openssl', args);
+    } finally {
+        // Always remove temp files — even if runCommand somehow throws.
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
 
     if (result.ok) {
         return {
@@ -224,7 +241,9 @@ export function buildDerToPemCommand(filePath: string, outputPath: string): stri
 export function buildPkcs12ExportCommand(certPath: string, keyPath: string, outputPath: string, password?: string): string {
     const args = ['pkcs12', '-export', '-in', certPath, '-inkey', keyPath, '-out', outputPath];
     if (password) {
-        args.push('-password', `pass:${password}`);
+        // Reference a passfile instead of embedding the secret directly so it does not appear
+        // in shell history when the user pastes and runs this command.
+        args.push('-password', `file:${RECIPE_PASS_FILE}`);
     }
     return buildOpenSslCommand(args);
 }
@@ -235,7 +254,8 @@ export function buildPkcs12PemExportCommands(
     keyOutputPath: string,
     password?: string
 ): string {
-    const passwordArgs = password ? ['-passin', `pass:${password}`] : [];
+    // Reference a passfile instead of embedding the secret so it does not appear in shell history.
+    const passwordArgs = password ? ['-passin', `file:${RECIPE_PASS_FILE}`] : [];
     return [
         buildOpenSslCommand([
             'pkcs12',
@@ -253,25 +273,44 @@ export function buildPkcs12PemExportCommands(
 
 export function listJksAliases(filePath: string, password?: string): { summary: string; command: string; rawOutput: string } {
     const availability = detectExternalToolAvailability();
-    const args = ['-list', '-keystore', filePath];
+
+    // Build the display args using a passfile reference so the password does not appear in the UI.
+    const displayArgs = ['-list', '-keystore', filePath];
     if (password) {
-        args.push('-storepass', password);
+        displayArgs.push('-storepass:file', RECIPE_PASS_FILE);
     }
 
     if (!availability.keytool.available) {
         return {
             summary: 'keytool is not available. The extension can only show the command recipe.',
-            command: buildKeytoolCommand(args),
+            command: buildKeytoolCommand(displayArgs),
             rawOutput: '',
         };
     }
 
-    const result = runCommand('keytool', args);
-    return {
-        summary: result.ok ? 'JKS aliases listed successfully.' : 'keytool could not list JKS aliases.',
-        command: result.command,
-        rawOutput: result.ok ? result.stdout : result.stderr,
-    };
+    // For live execution, write the password to a restricted-permission temp file so it does
+    // not appear in the process listing (e.g. `ps aux`) visible to other users on the machine.
+    let tempDir: string | undefined;
+    const execArgs = ['-list', '-keystore', filePath];
+    try {
+        if (password) {
+            tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cert-util-pass-'));
+            const passFile = path.join(tempDir, 'pass.txt');
+            fs.writeFileSync(passFile, password, { mode: 0o600 });
+            execArgs.push('-storepass:file', passFile);
+        }
+
+        const result = runCommand('keytool', execArgs);
+        return {
+            summary: result.ok ? 'JKS aliases listed successfully.' : 'keytool could not list JKS aliases.',
+            command: buildKeytoolCommand(displayArgs),
+            rawOutput: result.ok ? result.stdout : result.stderr,
+        };
+    } finally {
+        if (tempDir) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+    }
 }
 
 export function buildJksExportCommand(filePath: string, alias: string): string {
@@ -327,7 +366,9 @@ function detectCommandVersion(command: string, args: string[]): { available: boo
             timeout: 5000,
         });
         const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-        if (result.status === 0 || output) {
+        // result.error is set when spawnSync itself fails (e.g. ENOENT or SIGTERM timeout).
+        // Treat that as unavailable even if there happened to be partial output.
+        if ((result.status === 0 || output) && !result.error) {
             const version = output.split('\n')[0]?.trim();
             return {
                 available: true,
@@ -384,20 +425,11 @@ function normalizeRemoteTarget(target: string): { host: string; port: number } {
         throw new Error('Remote target is required.');
     }
 
-    // IPv6 bracketed address: [::1]:443 or [::1] (no port).
-    const ipv6Match = trimmed.match(/^\[([^\]]+)\](?::(\d+))?$/);
-    if (ipv6Match) {
-        const host = ipv6Match[1];
-        const port = ipv6Match[2] ? Number.parseInt(ipv6Match[2], 10) : 443;
-        return { host, port };
-    }
-
-    // Plain host:port or bare hostname / IPv4.
     const lastColonIndex = trimmed.lastIndexOf(':');
-    if (lastColonIndex > -1) {
+    if (lastColonIndex > -1 && trimmed.indexOf(']') === -1) {
         const host = trimmed.slice(0, lastColonIndex);
         const port = Number.parseInt(trimmed.slice(lastColonIndex + 1), 10);
-        if (Number.isInteger(port) && port > 0) {
+        if (Number.isInteger(port) && port > 0 && port <= 65535) {
             return { host, port };
         }
     }

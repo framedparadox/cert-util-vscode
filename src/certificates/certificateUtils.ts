@@ -242,7 +242,9 @@ export function parseCertificateInputFromFile(filePath: string, sourceKind: Cert
 export function validateArtifact(artifact: ParsedCertificateArtifact, options: ValidationOptions = {}): CertificateValidationResult {
     if (!artifact.certificates.length) {
         return {
-            status: 'valid',
+            // No certificates — cannot be 'valid'. Use 'expired' so consumers see a non-success
+            // status that matches valid:false (returning 'valid' with valid:false is contradictory).
+            status: 'expired',
             valid: false,
             summary: 'No X.509 certificates available to validate.',
             issues: [
@@ -347,11 +349,17 @@ export function validateArtifact(artifact: ParsedCertificateArtifact, options: V
 
     if (artifact.chain) {
         for (const warning of artifact.chain.warnings) {
-            issues.push({
-                severity: 'warning',
-                code: 'chain-warning',
-                message: warning,
-            });
+            // Only surface chain warnings here if they were NOT already folded into
+            // artifact.warnings by parseArtifact. parseArtifact always spreads chain.warnings
+            // into artifact.warnings, so every warning in artifact.chain.warnings will already
+            // be visible in the Inspect result. Skip them here to prevent double-reporting.
+            if (!artifact.warnings.includes(warning)) {
+                issues.push({
+                    severity: 'warning',
+                    code: 'chain-warning',
+                    message: warning,
+                });
+            }
         }
     }
 
@@ -608,7 +616,7 @@ function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: strin
         publicKeyAlgorithm: publicKeyDetails,
         bits: typeof legacy.bits === 'number' ? legacy.bits : undefined,
         isCertificateAuthority: cert.ca,
-        isSelfSigned: cert.subject === cert.issuer,
+        isSelfSigned: isCertificateSelfSigned(cert),
         purposeHints,
     };
 }
@@ -618,18 +626,24 @@ function determineCertificateType(
     keyUsage: string[],
     extendedKeyUsage: string[]
 ): string {
-    const subject = cert.subject.toLowerCase();
-    const usages = new Set([...keyUsage, ...extendedKeyUsage.map((usage) => usage.toLowerCase())]);
+    // Classify purely by OID-based Extended Key Usage values. Subject-string heuristics
+    // (e.g. subject.includes('code')) are unreliable because domain names and org names
+    // can match by coincidence, leading to wrong classifications.
+    const ekuSet = new Set(extendedKeyUsage);
 
     if (cert.ca) {
         return 'Certificate Authority';
     }
 
-    if (usages.has('1.3.6.1.5.5.7.3.3') || subject.includes('code')) {
+    if (ekuSet.has('1.3.6.1.5.5.7.3.3')) {
         return 'Code Signing';
     }
 
-    if (usages.has('1.3.6.1.5.5.7.3.2') || subject.includes('client')) {
+    if (ekuSet.has('1.3.6.1.5.5.7.3.4')) {
+        return 'Email Protection';
+    }
+
+    if (ekuSet.has('1.3.6.1.5.5.7.3.2') && !ekuSet.has('1.3.6.1.5.5.7.3.1')) {
         return 'Client Authentication';
     }
 
@@ -637,7 +651,10 @@ function determineCertificateType(
 }
 
 function extractAlgorithm(cert: crypto.X509Certificate): string {
-    return cert.fingerprint256 ? 'SHA256' : 'Unknown';
+    // `signatureAlgorithm` is available on Node 18.13+ / 20+.  Fall back gracefully on
+    // older runtimes rather than reporting the fingerprint hash as the cert algorithm.
+    const sigAlg = (cert as crypto.X509Certificate & { signatureAlgorithm?: string }).signatureAlgorithm;
+    return sigAlg || 'Unknown';
 }
 
 function generateCertificateId(filePath: string, serialNumber: string): string {
@@ -751,6 +768,22 @@ function findDuplicates(values: string[]): string[] {
     }
 
     return [...counts.entries()].filter(([, count]) => count > 1).map(([value]) => value);
+}
+
+/**
+ * Returns true only when the certificate's DN comparison AND a cryptographic self-signature
+ * verification both pass.  A certificate that merely spoofs its issuer DN to match its own
+ * subject will fail the public-key check and will not be reported as self-signed.
+ */
+function isCertificateSelfSigned(cert: crypto.X509Certificate): boolean {
+    if (cert.subject !== cert.issuer) {
+        return false;
+    }
+    try {
+        return cert.verify(cert.publicKey);
+    } catch {
+        return false;
+    }
 }
 
 function toCertificateDetails(details: ParsedCertificateDetails): CertificateDetails {

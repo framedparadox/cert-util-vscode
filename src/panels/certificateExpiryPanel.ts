@@ -8,35 +8,40 @@ import {
     scanCertificateFile,
 } from '../certificates/certificateUtils';
 
+/** Maximum directory recursion depth for the certificate scanner. */
+const MAX_SCAN_DEPTH = 10;
+
 export class CertificateExpiryPanel {
-    public static currentPanel: CertificateExpiryPanel | undefined;
-    private readonly _panel: vscode.WebviewPanel;
-    private _disposables: vscode.Disposable[] = [];
+    // Private so external code cannot null-out or swap the singleton reference.
+    private static currentPanel: CertificateExpiryPanel | undefined;
+
+    private readonly panel: vscode.WebviewPanel;
+    private readonly disposables: vscode.Disposable[] = [];
 
     private constructor(panel: vscode.WebviewPanel) {
-        this._panel = panel;
-        this._panel.webview.html = this._getWebviewContent();
-        this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
+        this.panel = panel;
+        this.panel.webview.html = this.getWebviewContent();
+        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
-        this._panel.webview.onDidReceiveMessage(
+        this.panel.webview.onDidReceiveMessage(
             (message) => {
                 switch (message.command) {
                     case 'openFolder':
-                        this.handleOpenFolder();
+                        void this.handleOpenFolder();
                         return;
                     case 'scanCertificates':
-                        this.handleScanCertificates(message.folderPath);
+                        void this.handleScanCertificates(message.folderPath);
                         return;
                 }
             },
             null,
-            this._disposables
+            this.disposables
         );
     }
 
     public static render(extensionUri: vscode.Uri) {
         if (CertificateExpiryPanel.currentPanel) {
-            CertificateExpiryPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
+            CertificateExpiryPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
         } else {
             const panel = vscode.window.createWebviewPanel(
                 'certificateExpiryPanel',
@@ -56,63 +61,47 @@ export class CertificateExpiryPanel {
 
     private async handleOpenFolder() {
         try {
-            const options: vscode.OpenDialogOptions = {
+            const folderUri = await vscode.window.showOpenDialog({
                 canSelectMany: false,
                 canSelectFiles: false,
                 canSelectFolders: true,
                 openLabel: 'Select Folder',
-            };
+            });
 
-            const folderUri = await vscode.window.showOpenDialog(options);
-
-            if (folderUri && folderUri[0]) {
-                const selectedPath = folderUri[0].fsPath;
-                if (this._panel && this._panel.webview) {
-                    this._panel.webview.postMessage({
-                        command: 'folderSelected',
-                        path: selectedPath,
-                    });
-                }
-            }
-        } catch (error) {
-            if (this._panel && this._panel.webview) {
-                this._panel.webview.postMessage({
-                    command: 'error',
-                    message: `Failed to open folder dialog: ${error instanceof Error ? error.message : String(error)}`,
+            if (folderUri?.[0]) {
+                this.panel.webview.postMessage({
+                    command: 'folderSelected',
+                    path: folderUri[0].fsPath,
                 });
             }
+        } catch (error) {
+            this.postError(`Failed to open folder dialog: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
     private async handleScanCertificates(folderPath: string) {
         try {
-            if (!folderPath || folderPath.trim() === '') {
-                this._panel.webview.postMessage({
-                    command: 'error',
-                    message: 'Please enter a folder path',
-                });
+            if (!folderPath?.trim()) {
+                this.postError('Please select a folder path using the "Select Folder" button.');
                 return;
             }
 
-            if (!fs.existsSync(folderPath)) {
-                this._panel.webview.postMessage({
-                    command: 'error',
-                    message: `Folder not found: ${folderPath}`,
-                });
+            // Use async stat so we don't block the extension host thread.
+            let stat: fs.Stats;
+            try {
+                stat = await fs.promises.stat(folderPath);
+            } catch {
+                this.postError(`Folder not found: ${folderPath}`);
                 return;
             }
 
-            const stat = fs.statSync(folderPath);
             if (!stat.isDirectory()) {
-                this._panel.webview.postMessage({
-                    command: 'error',
-                    message: 'Path is not a directory',
-                });
+                this.postError('Path is not a directory.');
                 return;
             }
 
+            const files = await this.getAllFiles(folderPath);
             const certificates: ScannedCertificate[] = [];
-            const files = this.getAllFiles(folderPath);
 
             for (const file of files) {
                 const ext = path.extname(file).toLowerCase();
@@ -120,66 +109,75 @@ export class CertificateExpiryPanel {
                     try {
                         certificates.push(scanCertificateFile(file));
                     } catch {
-                        // Skip files that can't be parsed
+                        // Skip files that can't be parsed as valid certificates.
                     }
                 }
             }
 
             if (certificates.length === 0) {
-                this._panel.webview.postMessage({
-                    command: 'error',
-                    message: `No valid certificates found in ${folderPath}. Supported formats: ${SUPPORTED_CERTIFICATE_EXTENSIONS.join(', ')}`,
-                });
+                this.postError(
+                    `No valid certificates found in ${folderPath}. Supported formats: ${SUPPORTED_CERTIFICATE_EXTENSIONS.join(', ')}`
+                );
                 return;
             }
 
-            this._panel.webview.postMessage({
+            this.panel.webview.postMessage({
                 command: 'scanResult',
-                certificates: certificates,
+                certificates,
             });
         } catch (error) {
-            this._panel.webview.postMessage({
-                command: 'error',
-                message: `Failed to scan folder: ${error instanceof Error ? error.message : String(error)}`,
-            });
+            this.postError(`Failed to scan folder: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
-    private getAllFiles(dirPath: string, arrayOfFiles: string[] = [], depth: number = 0): string[] {
-        if (depth > 10) {
-            return arrayOfFiles;
+    /**
+     * Recursively collects all file paths under `dirPath` up to `MAX_SCAN_DEPTH` levels deep.
+     * Uses async FS APIs so the extension host event loop is not blocked on large trees.
+     * Symlinked directories are skipped to prevent infinite loops.
+     */
+    private async getAllFiles(dirPath: string, depth = 0): Promise<string[]> {
+        if (depth > MAX_SCAN_DEPTH) {
+            return [];
         }
 
-        const files = fs.readdirSync(dirPath);
+        let entries: fs.Dirent[];
+        try {
+            entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+        } catch {
+            return [];
+        }
 
-        files.forEach((file) => {
-            const filePath = path.join(dirPath, file);
-            const stat = fs.lstatSync(filePath);
-            if (stat.isDirectory() && !stat.isSymbolicLink()) {
-                arrayOfFiles = this.getAllFiles(filePath, arrayOfFiles, depth + 1);
-            } else if (stat.isFile()) {
-                arrayOfFiles.push(filePath);
+        const results: string[] = [];
+        for (const entry of entries) {
+            const fullPath = path.join(dirPath, entry.name);
+            if (entry.isDirectory() && !entry.isSymbolicLink()) {
+                const nested = await this.getAllFiles(fullPath, depth + 1);
+                results.push(...nested);
+            } else if (entry.isFile()) {
+                results.push(fullPath);
             }
-        });
+        }
+        return results;
+    }
 
-        return arrayOfFiles;
+    /** Post an inline error message to the webview (replaces alert() calls). */
+    private postError(message: string) {
+        this.panel.webview.postMessage({ command: 'error', message });
     }
 
     public dispose() {
         CertificateExpiryPanel.currentPanel = undefined;
-        this._panel.dispose();
-        while (this._disposables.length) {
-            const disposable = this._disposables.pop();
-            if (disposable) {
-                disposable.dispose();
-            }
+        this.panel.dispose();
+        while (this.disposables.length) {
+            this.disposables.pop()?.dispose();
         }
     }
 
-    private _getWebviewContent(): string {
-        const webview = this._panel.webview;
+    private getWebviewContent(): string {
+        const webview = this.panel.webview;
         const nonce = crypto.randomBytes(16).toString('base64url');
-        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+        // Remove 'unsafe-inline' from style-src — the <style> block carries the nonce instead.
+        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -187,7 +185,7 @@ export class CertificateExpiryPanel {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="${csp}">
     <title>Certificate Expiry Checker</title>
-    <style>
+    <style nonce="${nonce}">
         * {
             margin: 0;
             padding: 0;
@@ -418,12 +416,80 @@ export class CertificateExpiryPanel {
             color: var(--vscode-descriptionForeground);
         }
 
+        /* Inline error banner — replaces blocking alert() calls */
+        .error-banner {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            border-radius: 6px;
+            border: 1px solid #f44336;
+            background-color: rgba(244, 67, 54, 0.1);
+            color: #f44336;
+            font-size: 13px;
+        }
+
+        .error-banner.show {
+            display: flex;
+        }
+
+        .error-banner-close {
+            margin-left: auto;
+            background: transparent;
+            border: none;
+            color: inherit;
+            cursor: pointer;
+            padding: 0 4px;
+            font-size: 16px;
+            line-height: 1;
+        }
+
         #results {
             display: none;
         }
 
         #results.show {
             display: block;
+        }
+
+        /* Initially hidden elements (replaces inline style="display:none" which
+           would be blocked by the strict style-src nonce CSP). */
+        .initially-hidden {
+            display: none;
+        }
+
+        /* Table cells that are hidden by default until a toggle button shows them */
+        .col-type,
+        .col-format,
+        .col-validfrom,
+        .cell-type,
+        .cell-format,
+        .cell-validfrom {
+            display: none;
+        }
+
+        /* Column-toggle button bar above the results table */
+        .col-toggles {
+            margin-bottom: 16px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        /* Applied by JS when the user clicks a column-toggle button */
+        .col-visible {
+            display: table-cell;
+        }
+
+        /* Remove padding from the card that wraps the results table */
+        .card.card-table {
+            padding: 0;
+        }
+
+        /* CN column emphasis */
+        .cn-cell {
+            font-weight: 500;
         }
     </style>
 </head>
@@ -438,6 +504,12 @@ export class CertificateExpiryPanel {
         Certificate Expiry Checker
     </h1>
     <p class="lead">Scan certificate folders to quickly find valid, expiring, and expired certificates before they disrupt dependent services.</p>
+
+    <!-- Inline error banner (replaces alert() calls) -->
+    <div class="error-banner" id="error-banner" role="alert">
+        <span id="error-text"></span>
+        <button class="error-banner-close" id="error-close" aria-label="Dismiss">&times;</button>
+    </div>
 
     <div class="card">
         <div class="card-title">Scan Folder for Certificates</div>
@@ -460,7 +532,7 @@ export class CertificateExpiryPanel {
                     </svg>
                     <span id="scan-text">Scan Certificates</span>
                 </button>
-                <button class="outline" id="refresh-btn" title="Rescan Current Folder" style="display: none;">
+                <button class="outline initially-hidden" id="refresh-btn" title="Rescan Current Folder">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="23 4 23 10 17 10"></polyline>
                         <polyline points="1 20 1 14 7 14"></polyline>
@@ -479,7 +551,7 @@ export class CertificateExpiryPanel {
             <button class="tab" data-tab="valid">Valid (<span id="count-valid">0</span>)</button>
         </div>
 
-        <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <div class="col-toggles">
             <button class="outline" id="toggle-type" data-column="type">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="9 11 12 14 22 4"></polyline>
@@ -503,17 +575,17 @@ export class CertificateExpiryPanel {
             </button>
         </div>
 
-        <div class="card" style="padding: 0;">
+        <div class="card card-table">
             <table>
                 <thead>
                     <tr>
                         <th>Status</th>
                         <th>Certificate Name (CN)</th>
                         <th>Issuer</th>
-                        <th class="col-type" style="display: none;">Type</th>
-                        <th class="col-format" style="display: none;">Format</th>
+                        <th class="col-type">Type</th>
+                        <th class="col-format">Format</th>
                         <th>Algorithm</th>
-                        <th class="col-validfrom" style="display: none;">Valid From</th>
+                        <th class="col-validfrom">Valid From</th>
                         <th>Expiry Date</th>
                     </tr>
                 </thead>
@@ -537,18 +609,33 @@ export class CertificateExpiryPanel {
                 validfrom: false
             };
 
+            // --- Error banner helpers (replaces blocking alert()) ---
+            const errorBanner = document.getElementById('error-banner');
+            const errorText = document.getElementById('error-text');
+
+            function showError(message) {
+                errorText.textContent = message;
+                errorBanner.classList.add('show');
+            }
+
+            function hideError() {
+                errorBanner.classList.remove('show');
+            }
+
+            document.getElementById('error-close').addEventListener('click', hideError);
+
             // Helper function to trigger scan
             function triggerScan() {
                 const folderPath = document.getElementById('folder-path').value.trim();
 
                 if (!folderPath) {
-                    alert('Please select a folder path using the "Select Folder" button');
+                    showError('Please select a folder path using the "Select Folder" button.');
                     return;
                 }
 
-                if (isScanning) return;
+                if (isScanning) { return; }
 
-                // Use backend scanning
+                hideError();
                 isScanning = true;
                 const scanText = document.getElementById('scan-text');
                 const scanBtn = document.getElementById('scan-btn');
@@ -566,22 +653,19 @@ export class CertificateExpiryPanel {
                 columnVisibility[columnName] = !columnVisibility[columnName];
                 const isVisible = columnVisibility[columnName];
 
-                // Toggle header
-                const headers = document.querySelectorAll('.col-' + columnName);
-                headers.forEach(header => {
-                    header.style.display = isVisible ? '' : 'none';
-                });
-
-                // Toggle cells in body
-                const cells = document.querySelectorAll('.cell-' + columnName);
-                cells.forEach(cell => {
-                    cell.style.display = isVisible ? '' : 'none';
+                // Toggle header and cell visibility via classList (not .style.display which
+                // is blocked by strict style-src CSP). The CSS rule for .col-* / .cell-*
+                // sets display:none by default; removing that rule via a .visible override.
+                const elements = document.querySelectorAll('.col-' + columnName + ', .cell-' + columnName);
+                elements.forEach(el => {
+                    el.classList.toggle('col-visible', isVisible);
                 });
 
                 // Update button text
                 const button = document.getElementById('toggle-' + columnName);
                 if (button) {
-                    const label = columnName.charAt(0).toUpperCase() + columnName.slice(1).replace('validfrom', 'Valid From');
+                    const label = columnName === 'validfrom' ? 'Valid From'
+                        : columnName.charAt(0).toUpperCase() + columnName.slice(1);
                     button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
                         (isVisible ?
                             '<polyline points="20 6 9 17 4 12"></polyline>' :
@@ -590,15 +674,14 @@ export class CertificateExpiryPanel {
                         '</svg> ' + (isVisible ? 'Hide' : 'Show') + ' ' + label;
                 }
 
-                // Update colspan for no-results row
                 updateNoResultsColspan();
             }
 
             function updateNoResultsColspan() {
                 let visibleColumns = 5; // Status, CN, Issuer, Algorithm, Expiry Date (always visible)
-                if (columnVisibility.type) visibleColumns++;
-                if (columnVisibility.format) visibleColumns++;
-                if (columnVisibility.validfrom) visibleColumns++;
+                if (columnVisibility.type) { visibleColumns++; }
+                if (columnVisibility.format) { visibleColumns++; }
+                if (columnVisibility.validfrom) { visibleColumns++; }
 
                 const noResultsCell = document.querySelector('.no-results');
                 if (noResultsCell) {
@@ -607,62 +690,28 @@ export class CertificateExpiryPanel {
             }
 
             // Event listeners
-            const browseBtn = document.getElementById('browse-btn');
+            document.getElementById('browse-btn').addEventListener('click', () => {
+                vscode.postMessage({ command: 'openFolder' });
+            });
 
-            if (browseBtn) {
-                browseBtn.addEventListener('click', () => {
-                    vscode.postMessage({
-                        command: 'openFolder'
-                    });
-                });
-            }
+            document.getElementById('folder-path').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') { triggerScan(); }
+            });
 
-            // Allow Enter key to trigger scan
-            const folderPathInput = document.getElementById('folder-path');
-            if (folderPathInput) {
-                folderPathInput.addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') {
-                        triggerScan();
-                    }
-                });
-            }
+            document.getElementById('scan-btn').addEventListener('click', triggerScan);
 
-            const scanBtn = document.getElementById('scan-btn');
-            if (scanBtn) {
-                scanBtn.addEventListener('click', triggerScan);
-            }
+            document.getElementById('refresh-btn').addEventListener('click', () => {
+                const folderPath = document.getElementById('folder-path').value;
+                if (folderPath) {
+                    vscode.postMessage({ command: 'scanCertificates', folderPath });
+                } else {
+                    triggerScan();
+                }
+            });
 
-            // Refresh button to rescan the current folder
-            const refreshBtn = document.getElementById('refresh-btn');
-            if (refreshBtn) {
-                refreshBtn.addEventListener('click', () => {
-                    const folderPath = document.getElementById('folder-path').value;
-                    if (folderPath) {
-                        vscode.postMessage({
-                            command: 'scanCertificates',
-                            folderPath
-                        });
-                    } else {
-                        triggerScan();
-                    }
-                });
-            }
-
-            // Column toggle buttons
-            const toggleTypeBtn = document.getElementById('toggle-type');
-            if (toggleTypeBtn) {
-                toggleTypeBtn.addEventListener('click', () => toggleColumn('type'));
-            }
-
-            const toggleFormatBtn = document.getElementById('toggle-format');
-            if (toggleFormatBtn) {
-                toggleFormatBtn.addEventListener('click', () => toggleColumn('format'));
-            }
-
-            const toggleValidFromBtn = document.getElementById('toggle-validfrom');
-            if (toggleValidFromBtn) {
-                toggleValidFromBtn.addEventListener('click', () => toggleColumn('validfrom'));
-            }
+            document.getElementById('toggle-type').addEventListener('click', () => toggleColumn('type'));
+            document.getElementById('toggle-format').addEventListener('click', () => toggleColumn('format'));
+            document.getElementById('toggle-validfrom').addEventListener('click', () => toggleColumn('validfrom'));
 
             // Tab switching
             document.querySelectorAll('.tab').forEach(tab => {
@@ -674,12 +723,12 @@ export class CertificateExpiryPanel {
                 });
             });
 
-            // Make functions globally accessible
-            window.escapeHtml = function(text) {
+            // escapeHtml via a text node — no regex needed
+            function escapeHtml(text) {
                 const div = document.createElement('div');
                 div.textContent = text;
                 return div.innerHTML;
-            };
+            }
 
             // Helper functions
             function getStatus(cert) {
@@ -707,7 +756,7 @@ export class CertificateExpiryPanel {
 
                 Object.keys(counts).forEach(key => {
                     const el = document.getElementById('count-' + key);
-                    if (el) el.textContent = counts[key];
+                    if (el) { el.textContent = counts[key]; }
                 });
             }
 
@@ -728,15 +777,11 @@ export class CertificateExpiryPanel {
                 }
 
                 // Sort by expiry date ascending (soonest to expire first)
-                return filtered.sort((a, b) => {
-                    const dateA = new Date(a.expiryDate);
-                    const dateB = new Date(b.expiryDate);
-                    return dateA - dateB;
-                });
+                return filtered.sort((a, b) => new Date(a.expiryDate) - new Date(b.expiryDate));
             }
 
             function formatDate(dateStr) {
-                if (!dateStr) return 'N/A';
+                if (!dateStr) { return 'N/A'; }
                 const date = new Date(dateStr);
                 return date.toLocaleDateString('en-US', {
                     year: 'numeric',
@@ -750,11 +795,10 @@ export class CertificateExpiryPanel {
                 const filtered = filterCertificates();
 
                 if (filtered.length === 0) {
-                    // Calculate visible columns for colspan
-                    let visibleColumns = 5; // Status, CN, Issuer, Algorithm, Expiry Date (always visible)
-                    if (columnVisibility.type) visibleColumns++;
-                    if (columnVisibility.format) visibleColumns++;
-                    if (columnVisibility.validfrom) visibleColumns++;
+                    let visibleColumns = 5;
+                    if (columnVisibility.type) { visibleColumns++; }
+                    if (columnVisibility.format) { visibleColumns++; }
+                    if (columnVisibility.validfrom) { visibleColumns++; }
                     tbody.innerHTML = '<tr><td colspan="' + visibleColumns + '" class="no-results">No certificates found</td></tr>';
                     return;
                 }
@@ -769,20 +813,15 @@ export class CertificateExpiryPanel {
 
                     const dateClass = status === 'expired' ? 'expired' : (status === 'expiring' ? 'expiring' : '');
 
-                    // Display style based on columnVisibility
-                    const typeDisplay = columnVisibility.type ? '' : ' style="display: none;"';
-                    const formatDisplay = columnVisibility.format ? '' : ' style="display: none;"';
-                    const validFromDisplay = columnVisibility.validfrom ? '' : ' style="display: none;"';
-
                     return \`
                         <tr>
                             <td>\${statusBadge[status]}</td>
-                            <td style="font-weight: 500;">\${window.escapeHtml(cert.owner)}</td>
-                            <td>\${window.escapeHtml(cert.issuer || 'N/A')}</td>
-                            <td class="cell-type"\${typeDisplay}>\${window.escapeHtml(cert.type)}</td>
-                            <td class="cell-format"\${formatDisplay}>\${window.escapeHtml(cert.format || 'N/A')}</td>
-                            <td>\${window.escapeHtml(cert.algorithm || 'N/A')}</td>
-                            <td class="cell-validfrom"\${validFromDisplay}>\${formatDate(cert.validFrom)}</td>
+                            <td class="cn-cell">\${escapeHtml(cert.owner)}</td>
+                            <td>\${escapeHtml(cert.issuer || 'N/A')}</td>
+                            <td class="cell-type">\${escapeHtml(cert.type)}</td>
+                            <td class="cell-format">\${escapeHtml(cert.format || 'N/A')}</td>
+                            <td>\${escapeHtml(cert.algorithm || 'N/A')}</td>
+                            <td class="cell-validfrom">\${formatDate(cert.validFrom)}</td>
                             <td class="expiry-date \${dateClass}">\${formatDate(cert.expiryDate)}</td>
                         </tr>
                     \`;
@@ -790,56 +829,48 @@ export class CertificateExpiryPanel {
             }
 
             // Message handling
-        window.addEventListener('message', event => {
-            const message = event.data;
+            window.addEventListener('message', event => {
+                const message = event.data;
 
-            switch (message.command) {
-                case 'folderSelected':
-                    const folderPathInput = document.getElementById('folder-path');
-                    folderPathInput.value = message.path;
+                switch (message.command) {
+                    case 'folderSelected': {
+                        document.getElementById('folder-path').value = message.path;
+                        hideError();
 
-                    // Automatically trigger scan when folder is selected
-                    isScanning = true;
-                    const scanText = document.getElementById('scan-text');
-                    const scanBtn = document.getElementById('scan-btn');
-                    scanText.innerHTML = '<span class="loading-spinner"></span> Scanning...';
-                    scanBtn.disabled = true;
+                        // Automatically trigger scan when folder is selected
+                        isScanning = true;
+                        document.getElementById('scan-text').innerHTML = '<span class="loading-spinner"></span> Scanning...';
+                        document.getElementById('scan-btn').disabled = true;
 
-                    vscode.postMessage({
-                        command: 'scanCertificates',
-                        folderPath: message.path
-                    });
-                    break;
-
-                case 'scanResult':
-                    isScanning = false;
-                    const scanBtnResult = document.getElementById('scan-btn');
-                    const scanTextResult = document.getElementById('scan-text');
-                    const refreshBtnResult = document.getElementById('refresh-btn');
-                    scanTextResult.textContent = 'Scan Certificates';
-                    scanBtnResult.disabled = false;
-
-                    // Show refresh button for backend scans too
-                    if (refreshBtnResult) {
-                        refreshBtnResult.style.display = 'inline-flex';
+                        vscode.postMessage({
+                            command: 'scanCertificates',
+                            folderPath: message.path
+                        });
+                        break;
                     }
 
-                    allCertificates = message.certificates;
-                    document.getElementById('results').classList.add('show');
-                    updateCounts();
-                    renderTable();
-                    break;
+                    case 'scanResult': {
+                        isScanning = false;
+                        document.getElementById('scan-text').textContent = 'Scan Certificates';
+                        document.getElementById('scan-btn').disabled = false;
+                        document.getElementById('refresh-btn').classList.remove('initially-hidden');
 
-                case 'error':
-                    isScanning = false;
-                    const scanBtnError = document.getElementById('scan-btn');
-                    const scanTextError = document.getElementById('scan-text');
-                    if (scanTextError) scanTextError.textContent = 'Scan Certificates';
-                    if (scanBtnError) scanBtnError.disabled = false;
-                    alert(message.message);
-                    break;
-            }
-        });
+                        allCertificates = message.certificates;
+                        document.getElementById('results').classList.add('show');
+                        updateCounts();
+                        renderTable();
+                        break;
+                    }
+
+                    case 'error': {
+                        isScanning = false;
+                        document.getElementById('scan-text').textContent = 'Scan Certificates';
+                        document.getElementById('scan-btn').disabled = false;
+                        showError(message.message);
+                        break;
+                    }
+                }
+            });
         })();
     </script>
 </body>

@@ -76,7 +76,7 @@ export class CertificateToolsProvider implements vscode.WebviewViewProvider {
 
     private getHtml(webview: vscode.Webview): string {
         const nonce = crypto.randomBytes(16).toString('base64url');
-        const csp = `default-src 'none'; img-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+        const csp = `default-src 'none'; img-src ${webview.cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
         const tools = CERTIFICATE_TOOLS.map((tool) => this.renderTool(webview, tool)).join('');
 
         return `<!DOCTYPE html>
@@ -85,7 +85,7 @@ export class CertificateToolsProvider implements vscode.WebviewViewProvider {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
-<style>
+<style nonce="${nonce}">
     html,
     body {
         height: 100%;

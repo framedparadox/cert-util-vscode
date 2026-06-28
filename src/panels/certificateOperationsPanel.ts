@@ -38,7 +38,7 @@ function readFileAsText(filePath: string): string | undefined {
 }
 
 export class CertificateOperationsPanel {
-    public static currentPanel: CertificateOperationsPanel | undefined;
+    private static currentPanel: CertificateOperationsPanel | undefined;
 
     private readonly panel: vscode.WebviewPanel;
     private readonly disposables: vscode.Disposable[] = [];
@@ -383,7 +383,7 @@ export class CertificateOperationsPanel {
     private getWebviewContent(): string {
         const webview = this.panel.webview;
         const nonce = crypto.randomBytes(16).toString('base64url');
-        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -392,7 +392,7 @@ export class CertificateOperationsPanel {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="${csp}">
     <title>Certificate Conversion & Keystore</title>
-    <style>
+    <style nonce="${nonce}">
         :root {
             color-scheme: light dark;
         }
@@ -690,6 +690,12 @@ export class CertificateOperationsPanel {
         const copyStore = new Map();
         let copyId = 0;
 
+        // Prune stale entries on every re-render to prevent unbounded Map growth.
+        function clearCopyStore() {
+            copyStore.clear();
+            copyId = 0;
+        }
+
         function setActiveTab(tabName) {
             document.querySelectorAll('.tab').forEach((tab) => {
                 tab.classList.toggle('active', tab.dataset.tab === tabName);
@@ -750,6 +756,7 @@ export class CertificateOperationsPanel {
         }
 
         function renderTextResult(hostId, payload, title) {
+            clearCopyStore();
             const host = document.getElementById(hostId);
             const commandKey = payload.command ? stashCopy(payload.command) : undefined;
             const bodyKey = payload.body ? stashCopy(payload.body) : undefined;
