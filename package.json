@@ -137,8 +137,103 @@
                 "title": "Open Certificate Expiry Checker",
                 "category": "Certificate Utility",
                 "icon": "$(calendar)"
+            },
+            {
+                "command": "certificateUtil.openGenerateTool",
+                "title": "Open Certificate Generator",
+                "category": "Certificate Utility",
+                "icon": "$(new-file)"
+            },
+            {
+                "command": "certificateUtil.verifyKeyMatchesCertificate",
+                "title": "Inspect Private Key and Certificate Match",
+                "category": "Certificate Utility",
+                "icon": "$(key)"
+            },
+            {
+                "command": "certificateUtil.compareCertificates",
+                "title": "Open Certificate Comparison",
+                "category": "Certificate Utility",
+                "icon": "$(diff)"
+            },
+            {
+                "command": "certificateUtil.checkRemoteWatchlist",
+                "title": "Open Remote Watchlist Report",
+                "category": "Certificate Utility",
+                "icon": "$(broadcast)"
             }
-        ]
+        ],
+        "menus": {
+            "explorer/context": [
+                {
+                    "command": "certificateUtil.inspectCertificateFile",
+                    "when": "resourceExtname =~ /\\.(pem|crt|cer|cert|der|ca-bundle|ca|bundle|p12|pfx|p7b|p7c|p7s|csr|key|jks)$/",
+                    "group": "navigation@90"
+                }
+            ],
+            "editor/context": [
+                {
+                    "command": "certificateUtil.inspectActiveCertificate",
+                    "when": "resourceExtname =~ /\\.(pem|crt|cer|cert|der|ca-bundle|ca|bundle|csr|key)$/",
+                    "group": "navigation@90"
+                }
+            ],
+            "editor/title": [
+                {
+                    "command": "certificateUtil.inspectActiveCertificate",
+                    "when": "resourceExtname =~ /\\.(pem|crt|cer|cert|der|ca-bundle|ca|bundle|csr|key)$/",
+                    "group": "navigation"
+                }
+            ]
+        },
+        "customEditors": [
+            {
+                "viewType": "certificateUtil.certificateViewer",
+                "displayName": "Certificate Viewer",
+                "selector": [
+                    {
+                        "filenamePattern": "*.{pem,crt,cer,cert,der,ca-bundle,ca,bundle,p7b,p7c}"
+                    }
+                ],
+                "priority": "option"
+            }
+        ],
+        "configuration": {
+            "title": "Certificate Utility",
+            "properties": {
+                "certificateUtil.expiryWarningDays": {
+                    "type": "number",
+                    "default": 30,
+                    "minimum": 1,
+                    "markdownDescription": "Number of days before a certificate's expiry date at which it is reported as **expiring soon** in validation results, the expiry scanner, and the status bar."
+                },
+                "certificateUtil.defaultRemotePort": {
+                    "type": "number",
+                    "default": 443,
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Default TCP port assumed when a remote TLS endpoint is entered without an explicit port."
+                },
+                "certificateUtil.opensslPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to the OpenSSL executable. Leave empty to use 'openssl' from the system PATH. OpenSSL is only required for conversion and keystore operations."
+                },
+                "certificateUtil.keytoolPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to the Java keytool executable. Leave empty to use 'keytool' from the system PATH. keytool is only required for JKS keystore operations."
+                },
+                "certificateUtil.remoteWatchlist": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Remote TLS endpoints (`host:port`) to monitor with the **Open Remote Watchlist Report** command. Example: `example.com:443`."
+                }
+            }
+        }
     },
     "scripts": {
         "postinstall": "npm run compile",
@@ -161,6 +256,7 @@
     "devDependencies": {
         "@types/mocha": "^10.0.10",
         "@types/node": "22.x",
+        "@types/node-forge": "^1.3.14",
         "@types/vscode": "1.105.0",
         "@typescript-eslint/eslint-plugin": "^8.45.0",
         "@typescript-eslint/parser": "^8.45.0",
@@ -179,5 +275,13 @@
             "diff": "9.0.0",
             "serialize-javascript": "7.0.6"
         }
+    },
+    "dependencies": {
+        "@peculiar/asn1-schema": "^2.8.0",
+        "@peculiar/asn1-x509": "^2.8.0",
+        "@peculiar/x509": "^2.0.0",
+        "node-forge": "^1.4.0",
+        "pkijs": "^3.4.0",
+        "reflect-metadata": "^0.2.2"
     }
 }

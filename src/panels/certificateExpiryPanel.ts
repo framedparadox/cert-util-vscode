@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { SUPPORTED_CERTIFICATE_EXTENSIONS, ScannedCertificate, scanCertificateFile } from '../certificates/certificateUtils';
+import { ReportFormat, buildExpiryReport, reportFileName } from '../certificates/report';
+import { getConfig } from '../config';
 
 /** Maximum directory recursion depth for the certificate scanner. */
 const MAX_SCAN_DEPTH = 10;
@@ -46,6 +48,9 @@ export class CertificateExpiryPanel {
                             void this.handleScanCertificates(message.folderPath);
                         }
                         return;
+                    case 'exportReport':
+                        void this.handleExportReport(message.format);
+                        return;
                 }
             },
             null,
@@ -64,6 +69,33 @@ export class CertificateExpiryPanel {
 
             panel.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icons', 'cert-expiry.svg');
             CertificateExpiryPanel.currentPanel = new CertificateExpiryPanel(panel);
+        }
+    }
+
+    private async handleExportReport(format: unknown) {
+        try {
+            if (!this.lastCertificates.length) {
+                void vscode.window.showWarningMessage('Scan a folder before exporting a report.');
+                return;
+            }
+            const reportFormat: ReportFormat = format === 'json' || format === 'csv' ? format : 'markdown';
+            const content = buildExpiryReport(this.lastCertificates, reportFormat, getConfig().expiryWarningDays);
+            const target = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(
+                    path.join(
+                        this.selectedFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+                        reportFileName(reportFormat)
+                    )
+                ),
+                saveLabel: 'Export Report',
+            });
+            if (!target) {
+                return;
+            }
+            await vscode.workspace.fs.writeFile(target, Buffer.from(content, 'utf8'));
+            void vscode.window.showInformationMessage(`Exported ${path.basename(target.fsPath)}`);
+        } catch (error) {
+            this.postError(error instanceof Error ? error.message : String(error));
         }
     }
 
@@ -624,6 +656,12 @@ export class CertificateExpiryPanel {
                 </svg>
                 Show Valid From
             </button>
+            <select id="export-format" class="outline" aria-label="Report format">
+                <option value="markdown">Markdown</option>
+                <option value="json">JSON</option>
+                <option value="csv">CSV</option>
+            </select>
+            <button class="outline" id="export-btn" type="button" title="Export the current results as a report">Export Report</button>
         </div>
 
         <div class="card card-table">
@@ -650,6 +688,7 @@ export class CertificateExpiryPanel {
     <script nonce="${nonce}">
         (function() {
             const vscode = acquireVsCodeApi();
+            const EXPIRY_WARNING_DAYS = ${getConfig().expiryWarningDays};
             let allCertificates = [];
             let currentTab = 'all';
             let isScanning = false;
@@ -754,6 +793,10 @@ export class CertificateExpiryPanel {
 
             document.getElementById('scan-btn').addEventListener('click', triggerScan);
 
+            document.getElementById('export-btn').addEventListener('click', function () {
+                vscode.postMessage({ command: 'exportReport', format: document.getElementById('export-format').value });
+            });
+
             document.getElementById('refresh-btn').addEventListener('click', () => {
                 triggerScan();
             });
@@ -786,12 +829,11 @@ export class CertificateExpiryPanel {
             function getStatus(cert) {
                 const expiryDate = new Date(cert.expiryDate);
                 const today = new Date();
-                const oneMonthFromNow = new Date();
-                oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
+                const warningThreshold = new Date(today.getTime() + EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000);
 
                 if (expiryDate < today) {
                     return 'expired';
-                } else if (expiryDate < oneMonthFromNow) {
+                } else if (expiryDate < warningThreshold) {
                     return 'expiring';
                 } else {
                     return 'valid';

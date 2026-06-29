@@ -14,6 +14,8 @@ import {
     validateArtifact,
 } from '../certificates/certificateUtils';
 import { detectExternalToolAvailability, inspectRemoteCertificate, verifyWithOpenSsl } from '../certificates/externalTools';
+import { getConfig } from '../config';
+import { checkRevocation } from '../certificates/revocation';
 
 interface LaunchRequest {
     type: 'inspect-active' | 'inspect-file' | 'inspect-remote' | 'open-tab';
@@ -70,6 +72,16 @@ interface WebviewArtifactCertificate {
         infoAccessEntries: string[];
         ocspUrls: string[];
         caIssuersUrls: string[];
+        crlDistributionPoints: string[];
+    };
+    extensions: {
+        authorityKeyIdentifier?: string;
+        subjectKeyIdentifier?: string;
+        basicConstraintsPathLength?: number;
+        certificatePolicies: string[];
+        nameConstraintsPermitted: string[];
+        nameConstraintsExcluded: string[];
+        hasEmbeddedScts: boolean;
     };
     raw: {
         pem: string;
@@ -96,6 +108,7 @@ interface WebviewChainPayload {
         issuerCommonName: string;
         serialNumber: string;
         isSelfSigned: boolean;
+        signatureVerified?: boolean;
     }>;
     warnings: string[];
     duplicateSerialNumbers: string[];
@@ -275,6 +288,7 @@ export class CertificatePanel {
         const validation = validateArtifact(this.currentArtifact, {
             hostname,
             purpose,
+            warningThresholdDays: getConfig().expiryWarningDays,
         });
 
         const issues = [...validation.issues];
@@ -298,6 +312,21 @@ export class CertificatePanel {
                 issues.push(...trustResult.issues);
                 command = trustResult.command;
                 rawOutput = trustResult.rawOutput;
+            }
+        }
+
+        if (message.checkRevocation) {
+            const certificates = this.currentArtifact.certificates;
+            const leafIndex = this.currentArtifact.chain?.leafIndex ?? 0;
+            const leaf = certificates[leafIndex];
+            if (leaf) {
+                const issuer = certificates.find((candidate, index) => index !== leafIndex && candidate.subject === leaf.issuer);
+                const revocation = await checkRevocation(leaf.pem, issuer?.pem);
+                issues.push({
+                    severity: revocation.status === 'revoked' ? 'error' : 'info',
+                    code: `revocation-${revocation.status}`,
+                    message: `Revocation check (${revocation.method}): ${revocation.detail}`,
+                });
             }
         }
 
@@ -498,6 +527,16 @@ export class CertificatePanel {
                 infoAccessEntries: certificate.infoAccessEntries,
                 ocspUrls: certificate.ocspUrls,
                 caIssuersUrls: certificate.caIssuersUrls,
+                crlDistributionPoints: certificate.crlDistributionPoints,
+            },
+            extensions: {
+                authorityKeyIdentifier: certificate.authorityKeyIdentifier,
+                subjectKeyIdentifier: certificate.subjectKeyIdentifier,
+                basicConstraintsPathLength: certificate.basicConstraintsPathLength,
+                certificatePolicies: certificate.certificatePolicies,
+                nameConstraintsPermitted: certificate.nameConstraintsPermitted,
+                nameConstraintsExcluded: certificate.nameConstraintsExcluded,
+                hasEmbeddedScts: certificate.hasEmbeddedScts,
             },
             raw: {
                 pem: certificate.pem,
@@ -861,6 +900,9 @@ export class CertificatePanel {
                     </div>
                 </div>
             </div>
+            <div class="field-wide">
+                <label><input id="validate-revocation" type="checkbox"> Check revocation online (OCSP/CRL)</label>
+            </div>
             <div class="actions">
                 <button id="validate-btn">Validate Current Artifact</button>
             </div>
@@ -1033,6 +1075,24 @@ export class CertificatePanel {
                 chain;
         }
 
+        function renderExtensionsCard(extensions) {
+            if (!extensions) {
+                return '';
+            }
+            const pathLen = typeof extensions.basicConstraintsPathLength === 'number'
+                ? String(extensions.basicConstraintsPathLength)
+                : 'None';
+            return '<div class="section-card"><h4>Extensions</h4><div class="kv">' +
+                '<strong>Subject Key ID</strong><span>' + escapeHtml(extensions.subjectKeyIdentifier || 'None') + '</span>' +
+                '<strong>Authority Key ID</strong><span>' + escapeHtml(extensions.authorityKeyIdentifier || 'None') + '</span>' +
+                '<strong>Path Length</strong><span>' + escapeHtml(pathLen) + '</span>' +
+                '<strong>Certificate Policies</strong><span>' + escapeHtml(extensions.certificatePolicies.join(', ') || 'None') + '</span>' +
+                '<strong>Name Constraints (Permitted)</strong><span>' + escapeHtml(extensions.nameConstraintsPermitted.join(', ') || 'None') + '</span>' +
+                '<strong>Name Constraints (Excluded)</strong><span>' + escapeHtml(extensions.nameConstraintsExcluded.join(', ') || 'None') + '</span>' +
+                '<strong>Certificate Transparency</strong><span>' + escapeHtml(extensions.hasEmbeddedScts ? 'Embedded SCTs present' : 'None') + '</span>' +
+                '</div></div>';
+        }
+
         function renderCertificateCard(certificate, index) {
             const pemKey = stashCopy(certificate.raw.pem);
             const jsonKey = stashCopy(certificate.raw.json);
@@ -1069,7 +1129,9 @@ export class CertificatePanel {
                     '<strong>Info Access</strong><span>' + escapeHtml(certificate.distribution.infoAccessEntries.join(', ') || 'None') + '</span>' +
                     '<strong>OCSP</strong><span>' + escapeHtml(certificate.distribution.ocspUrls.join(', ') || 'None') + '</span>' +
                     '<strong>CA Issuers</strong><span>' + escapeHtml(certificate.distribution.caIssuersUrls.join(', ') || 'None') + '</span>' +
+                    '<strong>CRL Distribution</strong><span>' + escapeHtml(certificate.distribution.crlDistributionPoints.join(', ') || 'None') + '</span>' +
                 '</div></div>' +
+                renderExtensionsCard(certificate.extensions) +
                 '<div class="actions">' +
                     '<button class="secondary" data-copy-key="' + pemKey + '">Copy PEM</button>' +
                     '<button class="secondary" data-copy-key="' + jsonKey + '">Copy JSON</button>' +
@@ -1080,17 +1142,23 @@ export class CertificatePanel {
         }
 
         function renderChainCard(chain) {
-            const entries = chain.entries.map((entry) =>
-                '<div class="section-card">' +
+            const entries = chain.entries.map((entry) => {
+                const signature = entry.signatureVerified === true
+                    ? renderStatusPill('valid', 'Signature verified')
+                    : entry.signatureVerified === false
+                        ? renderStatusPill('error', 'Signature NOT verified')
+                        : renderStatusPill('warning', 'Issuer not in chain');
+                return '<div class="section-card">' +
                     '<h4>Entry ' + (entry.index + 1) + '</h4>' +
                     '<div class="kv">' +
                         '<strong>Role</strong><span>' + escapeHtml(entry.role) + '</span>' +
                         '<strong>Subject</strong><span>' + escapeHtml(entry.subjectCommonName) + '</span>' +
                         '<strong>Issuer</strong><span>' + escapeHtml(entry.issuerCommonName) + '</span>' +
                         '<strong>Serial</strong><span>' + escapeHtml(entry.serialNumber) + '</span>' +
+                        '<strong>Signature</strong><span>' + signature + '</span>' +
                     '</div>' +
-                '</div>'
-            ).join('');
+                '</div>';
+            }).join('');
             const warnings = chain.warnings.length
                 ? '<ul class="warning-list">' + chain.warnings.map((warning) => '<li>' + renderStatusPill('warning', warning) + '</li>').join('') + '</ul>'
                 : '<p class="muted">No chain warnings.</p>';
@@ -1237,6 +1305,7 @@ export class CertificatePanel {
                 purpose: document.getElementById('validate-purpose').value,
                 caFile: document.getElementById('validate-ca-file').value,
                 caPath: document.getElementById('validate-ca-path').value,
+                checkRevocation: document.getElementById('validate-revocation').checked,
             });
         });
 

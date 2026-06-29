@@ -14,8 +14,10 @@ suite('extension manifest', () => {
         const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
             contributes?: {
                 commands?: Array<{ command: string; title?: string; category?: string }>;
-                views?: unknown;
-                viewsContainers?: unknown;
+                views?: Record<string, unknown>;
+                viewsContainers?: { activitybar?: Array<{ id?: string }> };
+                menus?: Record<string, unknown>;
+                configuration?: { properties?: Record<string, unknown> };
             };
             capabilities?: {
                 untrustedWorkspaces?: { supported?: boolean };
@@ -39,9 +41,30 @@ suite('extension manifest', () => {
         assert.ok(commands.has('certificateUtil.openExpiryChecker'));
         assert.ok(commandEntries.every((entry) => entry.category === 'Certificate Utility'));
         assert.ok(commandEntries.every((entry) => /^(Inspect|Open) /.test(entry.title ?? '')));
-        assert.strictEqual(packageJson.contributes?.views, undefined);
-        assert.strictEqual(packageJson.contributes?.viewsContainers, undefined);
+        assert.ok(packageJson.contributes?.views?.['certificateUtil-explorer'], 'sidebar view should be contributed');
+        assert.ok(
+            packageJson.contributes?.viewsContainers?.activitybar?.some((entry) => entry.id === 'certificateUtil-explorer'),
+            'activity bar container should be contributed'
+        );
         assert.strictEqual(packageJson.capabilities?.untrustedWorkspaces?.supported, true);
         assert.strictEqual(packageJson.capabilities?.virtualWorkspaces?.supported, false);
+    });
+
+    test('manifest contributes settings and Explorer context menus', () => {
+        const packageJsonPath = path.resolve(__dirname, '../../package.json');
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
+            contributes?: {
+                menus?: Record<string, Array<{ command?: string }>>;
+                configuration?: { properties?: Record<string, unknown> };
+            };
+        };
+
+        const properties = packageJson.contributes?.configuration?.properties ?? {};
+        assert.ok('certificateUtil.expiryWarningDays' in properties);
+        assert.ok('certificateUtil.opensslPath' in properties);
+        assert.ok('certificateUtil.keytoolPath' in properties);
+
+        const explorerMenu = packageJson.contributes?.menus?.['explorer/context'] ?? [];
+        assert.ok(explorerMenu.some((entry) => entry.command === 'certificateUtil.inspectCertificateFile'));
     });
 });

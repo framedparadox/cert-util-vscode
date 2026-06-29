@@ -6,6 +6,7 @@ import * as path from 'path';
 import {
     MAX_CERTIFICATE_FILE_BYTES,
     analyzeCertificateChain,
+    assessAlgorithmStrength,
     extractPemBlocks,
     getCertificateStatus,
     normalizePem,
@@ -192,6 +193,45 @@ suite('certificateUtils', () => {
         assert.strictEqual(getCertificateStatus('2026-06-16T00:00:00Z', reference), 'expired');
         assert.strictEqual(getCertificateStatus('2026-07-01T00:00:00Z', reference), 'expiring');
         assert.strictEqual(getCertificateStatus('2026-08-01T00:00:00Z', reference), 'valid');
+    });
+
+    test('honors a custom expiry warning threshold', () => {
+        const reference = new Date('2026-06-17T00:00:00Z');
+
+        // 2026-07-01 is 14 days out: "expiring" under the default 30-day window, "valid" under 7 days.
+        assert.strictEqual(getCertificateStatus('2026-07-01T00:00:00Z', reference, 30), 'expiring');
+        assert.strictEqual(getCertificateStatus('2026-07-01T00:00:00Z', reference, 7), 'valid');
+        // 2026-09-01 is ~76 days out: still flagged when the window is widened to 90 days.
+        assert.strictEqual(getCertificateStatus('2026-09-01T00:00:00Z', reference, 90), 'expiring');
+    });
+
+    test('flags weak signature algorithms and short keys', () => {
+        const [cert] = parseCertificateInputFromText(TEST_CERT_PEM, {
+            kind: 'pasted',
+            label: 'cert',
+        }).certificates;
+
+        // A healthy SHA-256 / 2048-bit RSA certificate raises no strength concerns.
+        assert.strictEqual(assessAlgorithmStrength(cert).length, 0);
+
+        const sha1 = assessAlgorithmStrength({ ...cert, signatureAlgorithm: 'sha1WithRSAEncryption' });
+        assert.ok(sha1.some((issue) => issue.code === 'weak-signature-algorithm' && issue.severity === 'warning'));
+
+        const md5 = assessAlgorithmStrength({ ...cert, signatureAlgorithm: 'md5WithRSAEncryption' });
+        assert.ok(md5.some((issue) => issue.code === 'weak-signature-algorithm' && issue.severity === 'error'));
+
+        const shortKey = assessAlgorithmStrength({ ...cert, publicKeyAlgorithm: 'RSA', bits: 1024 });
+        assert.ok(shortKey.some((issue) => issue.code === 'weak-key-size'));
+    });
+
+    test('cryptographically verifies chain links', () => {
+        const chain = analyzeCertificateChain(
+            parseCertificateInputFromText(TEST_CERT_PEM, { kind: 'pasted', label: 'self-signed' }).certificates
+        );
+
+        // The self-signed root verifies against its own key.
+        assert.strictEqual(chain?.entries[0].signatureVerified, true);
+        assert.ok(!chain?.warnings.some((warning) => warning.includes('could not be cryptographically verified')));
     });
 
     test('detects a self-signed CA certificate via cryptographic verification', () => {

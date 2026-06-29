@@ -2,7 +2,13 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ExternalToolAvailability, parseCertificateInputFromFile } from '../certificates/certificateUtils';
+import {
+    ExternalToolAvailability,
+    ParsedCertificateDetails,
+    parseCertificateInputFromFile,
+    parseCertificateInputFromText,
+} from '../certificates/certificateUtils';
+import { ParsedKeystore, parsePkcs7, parsePkcs12 } from '../certificates/cryptoProvider';
 import {
     buildDerToPemCommand,
     buildJksExportCommand,
@@ -46,6 +52,17 @@ function readFileAsText(filePath: string): string | undefined {
     } catch {
         return undefined;
     }
+}
+
+/** Maximum size for a keystore file read into memory for native parsing. */
+const MAX_KEYSTORE_FILE_BYTES = 10 * 1024 * 1024;
+
+function readKeystoreFile(filePath: string): Buffer {
+    const size = fs.statSync(filePath).size;
+    if (size > MAX_KEYSTORE_FILE_BYTES) {
+        throw new Error(`Keystore file exceeds the ${MAX_KEYSTORE_FILE_BYTES / (1024 * 1024)} MB limit.`);
+    }
+    return fs.readFileSync(filePath);
 }
 
 export class CertificateOperationsPanel {
@@ -189,28 +206,50 @@ export class CertificateOperationsPanel {
                     if (!bundlePath) {
                         throw new Error('Bundle file path is required.');
                     }
-                    const result = await inspectPkcs12File(bundlePath, password);
-                    this.postTextResult('convert', {
-                        title: 'PKCS#12 Inspection',
-                        summary: result.summary,
-                        command: result.command,
-                        body: result.rawOutput,
-                        warnings: result.warnings,
-                    });
+                    // Parse natively (node-forge) so inspection works without OpenSSL installed; fall
+                    // back to the OpenSSL recipe only if native parsing fails for an unsupported file.
+                    try {
+                        const parsed = parsePkcs12(readKeystoreFile(bundlePath), password ?? '');
+                        this.postTextResult('convert', {
+                            title: 'PKCS#12 Inspection',
+                            summary: 'Parsed natively without OpenSSL.',
+                            body: this.formatKeystoreSummary(parsed),
+                            warnings: parsed.warnings,
+                        });
+                    } catch (nativeError) {
+                        const result = await inspectPkcs12File(bundlePath, password);
+                        this.postTextResult('convert', {
+                            title: 'PKCS#12 Inspection',
+                            summary: `${result.summary} (native parse failed: ${nativeError instanceof Error ? nativeError.message : String(nativeError)})`,
+                            command: result.command,
+                            body: result.rawOutput,
+                            warnings: result.warnings,
+                        });
+                    }
                     return;
                 }
                 case 'inspectPkcs7': {
                     if (!bundlePath) {
                         throw new Error('Bundle file path is required.');
                     }
-                    const result = await inspectPkcs7File(bundlePath);
-                    this.postTextResult('convert', {
-                        title: 'PKCS#7 Inspection',
-                        summary: result.summary,
-                        command: result.command,
-                        body: result.rawOutput,
-                        warnings: result.warnings,
-                    });
+                    try {
+                        const parsed = parsePkcs7(readKeystoreFile(bundlePath));
+                        this.postTextResult('convert', {
+                            title: 'PKCS#7 Inspection',
+                            summary: 'Parsed natively without OpenSSL.',
+                            body: this.formatKeystoreSummary(parsed),
+                            warnings: parsed.warnings,
+                        });
+                    } catch (nativeError) {
+                        const result = await inspectPkcs7File(bundlePath);
+                        this.postTextResult('convert', {
+                            title: 'PKCS#7 Inspection',
+                            summary: `${result.summary} (native parse failed: ${nativeError instanceof Error ? nativeError.message : String(nativeError)})`,
+                            command: result.command,
+                            body: result.rawOutput,
+                            warnings: result.warnings,
+                        });
+                    }
                     return;
                 }
                 case 'buildPkcs12':
@@ -355,6 +394,39 @@ export class CertificateOperationsPanel {
 
         const extension = path.extname(keystorePath).toLowerCase();
         return extension === '.jks' ? 'jks' : 'pkcs12';
+    }
+
+    /** Renders natively-parsed keystore certificates (and any private-key metadata) as readable text. */
+    private formatKeystoreSummary(parsed: ParsedKeystore): string {
+        const lines: string[] = [];
+        if (parsed.privateKey) {
+            const bits = typeof parsed.privateKey.bits === 'number' ? ` (${parsed.privateKey.bits}-bit)` : '';
+            lines.push(`Private key: ${parsed.privateKey.algorithm}${bits}`, '');
+        }
+
+        if (!parsed.certificatePems.length) {
+            lines.push('No certificates found.');
+            return lines.join('\n');
+        }
+
+        const artifact = parseCertificateInputFromText(parsed.certificatePems.join('\n'), {
+            kind: 'file',
+            label: 'keystore',
+        });
+        artifact.certificates.forEach((certificate: ParsedCertificateDetails, index: number) => {
+            lines.push(
+                `Certificate ${index + 1}: ${certificate.subjectCommonName || certificate.subject}`,
+                `  Subject:    ${certificate.subject}`,
+                `  Issuer:     ${certificate.issuer}`,
+                `  Valid:      ${certificate.validFrom}  ->  ${certificate.validTo}`,
+                `  Serial:     ${certificate.serialNumber}`,
+                `  Key:        ${certificate.algorithm}`,
+                `  Signature:  ${certificate.signatureAlgorithm}`,
+                `  SHA-256:    ${certificate.fingerprint256}`,
+                ''
+            );
+        });
+        return lines.join('\n').trimEnd();
     }
 
     private runPendingLaunchRequest() {
