@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+    MAX_CERTIFICATE_FILE_BYTES,
     analyzeCertificateChain,
     extractPemBlocks,
     getCertificateStatus,
@@ -23,8 +24,10 @@ import {
     buildPemToDerCommand,
     buildPkcs12ExportCommand,
     buildPkcs12PemExportCommands,
+    detectExternalToolAvailability,
     parsePkcsCertificateOutput,
     parseRemoteInspectionOutput,
+    parseRemoteTarget,
 } from '../certificates/externalTools';
 
 const TEST_CERT_PEM = `-----BEGIN CERTIFICATE-----
@@ -144,6 +147,15 @@ suite('certificateUtils', () => {
         assert.strictEqual(parseCertificateInputFromFile(jksPath).kind, 'jks');
     });
 
+    test('rejects oversized certificate files before reading them', () => {
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cert-util-size-'));
+        const oversizedPath = path.join(tempDir, 'oversized.pem');
+        fs.writeFileSync(oversizedPath, '');
+        fs.truncateSync(oversizedPath, MAX_CERTIFICATE_FILE_BYTES + 1);
+
+        assert.throws(() => parseCertificateInputFromFile(oversizedPath), /10 MB file limit/);
+    });
+
     test('validates hostname and purpose against a parsed artifact', () => {
         const artifact = parseCertificateInputFromText(TEST_CERT_PEM, {
             kind: 'pasted',
@@ -181,6 +193,38 @@ suite('certificateUtils', () => {
         assert.strictEqual(getCertificateStatus('2026-07-01T00:00:00Z', reference), 'expiring');
         assert.strictEqual(getCertificateStatus('2026-08-01T00:00:00Z', reference), 'valid');
     });
+
+    test('detects a self-signed CA certificate via cryptographic verification', () => {
+        const [cert] = parseCertificateInputFromText(TEST_CERT_PEM, {
+            kind: 'pasted',
+            label: 'self-signed',
+        }).certificates;
+
+        assert.strictEqual(cert.isSelfSigned, true);
+        assert.strictEqual(cert.isCertificateAuthority, true);
+    });
+
+    test('parses the signature algorithm from the certificate DER', () => {
+        const [cert] = parseCertificateInputFromText(TEST_CERT_PEM, {
+            kind: 'pasted',
+            label: 'cert',
+        }).certificates;
+
+        assert.strictEqual(cert.signatureAlgorithm, 'sha256WithRSAEncryption');
+    });
+
+    test('summarizes the key algorithm and strength separately from the signature', () => {
+        const [cert] = parseCertificateInputFromText(TEST_CERT_PEM, {
+            kind: 'pasted',
+            label: 'cert',
+        }).certificates;
+
+        assert.strictEqual(cert.algorithm, 'RSA (2048-bit)');
+        assert.strictEqual(cert.publicKeyAlgorithm, 'RSA');
+        assert.strictEqual(cert.bits, 2048);
+        // `algorithm` is the key summary and must stay distinct from the signature algorithm.
+        assert.notStrictEqual(cert.algorithm, cert.signatureAlgorithm);
+    });
 });
 
 suite('externalTools helpers', () => {
@@ -204,5 +248,26 @@ suite('externalTools helpers', () => {
     test('parses OpenSSL-like outputs that contain PEM certificates', () => {
         assert.strictEqual(parsePkcsCertificateOutput(TEST_CERT_PEM), 1);
         assert.strictEqual(parseRemoteInspectionOutput(`${TEST_CERT_PEM}\n${TEST_CERT_PEM}`), 2);
+    });
+
+    test('parses host, port, and IPv6 remote targets', () => {
+        assert.deepStrictEqual(parseRemoteTarget('example.com'), { host: 'example.com', port: 443 });
+        assert.deepStrictEqual(parseRemoteTarget('example.com:8443'), { host: 'example.com', port: 8443 });
+        assert.deepStrictEqual(parseRemoteTarget('2001:db8::1'), { host: '2001:db8::1', port: 443 });
+        assert.deepStrictEqual(parseRemoteTarget('[2001:db8::1]:9443'), { host: '2001:db8::1', port: 9443 });
+    });
+
+    test('rejects malformed remote targets', () => {
+        assert.throws(() => parseRemoteTarget('https://example.com'), /host name or IP address/);
+        assert.throws(() => parseRemoteTarget('example.com:not-a-port'), /port must be a number/);
+        assert.throws(() => parseRemoteTarget('example.com:70000'), /port must be a number/);
+        assert.throws(() => parseRemoteTarget('[example.com]:443'), /valid IPv6 address/);
+    });
+
+    test('detects external tools asynchronously', async function () {
+        this.timeout(12000);
+        const availability = await detectExternalToolAvailability(true);
+        assert.strictEqual(typeof availability.openssl.available, 'boolean');
+        assert.strictEqual(typeof availability.keytool.available, 'boolean');
     });
 });

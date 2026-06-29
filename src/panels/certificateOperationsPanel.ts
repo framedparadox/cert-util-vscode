@@ -19,14 +19,25 @@ import {
 
 type OperationTab = 'convert' | 'keystore';
 type KeystoreType = 'auto' | 'jks' | 'pkcs12';
+const PICK_TARGETS = new Set(['convert-bundle-path', 'convert-cert-path', 'convert-key-path', 'keystore-path']);
 
 interface LaunchRequest {
     initialTab?: OperationTab;
 }
 
+function isWebviewMessage(value: unknown): value is Record<string, unknown> & { command: string } {
+    return typeof value === 'object' && value !== null && typeof (value as { command?: unknown }).command === 'string';
+}
+
+function optionalString(value: unknown): string | undefined {
+    return typeof value === 'string' ? value : undefined;
+}
+
 function normalizePassword(password: string | undefined): string | undefined {
-    const trimmed = password?.trim();
-    return trimmed ? trimmed : undefined;
+    if (password && password.length > 1024) {
+        throw new Error('Passwords are limited to 1024 characters.');
+    }
+    return password ? password : undefined;
 }
 
 function readFileAsText(filePath: string): string | undefined {
@@ -42,8 +53,18 @@ export class CertificateOperationsPanel {
 
     private readonly panel: vscode.WebviewPanel;
     private readonly disposables: vscode.Disposable[] = [];
-    private readonly capabilities: ExternalToolAvailability;
+    private readonly capabilities: Promise<ExternalToolAvailability>;
     private pendingLaunchRequest?: LaunchRequest;
+    private lastResult?: {
+        command: 'convertResult' | 'keystoreResult';
+        payload: {
+            title: string;
+            summary: string;
+            command?: string;
+            body?: string;
+            warnings?: string[];
+        };
+    };
 
     private constructor(panel: vscode.WebviewPanel, launchRequest?: LaunchRequest) {
         this.panel = panel;
@@ -55,19 +76,28 @@ export class CertificateOperationsPanel {
 
         this.panel.webview.onDidReceiveMessage(
             async (message) => {
+                if (!isWebviewMessage(message)) {
+                    return;
+                }
+
                 switch (message.command) {
                     case 'ready':
-                        this.postCapabilities();
+                        await this.postCapabilities();
+                        if (this.lastResult) {
+                            this.panel.webview.postMessage(this.lastResult);
+                        }
                         this.runPendingLaunchRequest();
                         return;
                     case 'pickPath':
-                        await this.handlePickPath(message.target);
+                        if (typeof message.target === 'string' && PICK_TARGETS.has(message.target)) {
+                            await this.handlePickPath(message.target);
+                        }
                         return;
                     case 'convertAction':
-                        this.handleConvertAction(message);
+                        await this.handleConvertAction(message);
                         return;
                     case 'keystoreAction':
-                        this.handleKeystoreAction(message);
+                        await this.handleKeystoreAction(message);
                         return;
                 }
             },
@@ -80,7 +110,7 @@ export class CertificateOperationsPanel {
         if (CertificateOperationsPanel.currentPanel) {
             CertificateOperationsPanel.currentPanel.pendingLaunchRequest = launchRequest;
             CertificateOperationsPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
-            CertificateOperationsPanel.currentPanel.postCapabilities();
+            void CertificateOperationsPanel.currentPanel.postCapabilities();
             CertificateOperationsPanel.currentPanel.runPendingLaunchRequest();
             return;
         }
@@ -91,8 +121,7 @@ export class CertificateOperationsPanel {
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [extensionUri],
+                localResourceRoots: [],
             }
         );
 
@@ -127,20 +156,13 @@ export class CertificateOperationsPanel {
         });
     }
 
-    private handleConvertAction(message: {
-        action: string;
-        bundlePath?: string;
-        password?: string;
-        certPath?: string;
-        keyPath?: string;
-        outputPath?: string;
-    }) {
+    private async handleConvertAction(message: Record<string, unknown>) {
         try {
-            const bundlePath = message.bundlePath?.trim();
-            const certPath = message.certPath?.trim();
-            const keyPath = message.keyPath?.trim();
-            const outputPath = message.outputPath?.trim();
-            const password = normalizePassword(message.password);
+            const bundlePath = optionalString(message.bundlePath)?.trim();
+            const certPath = optionalString(message.certPath)?.trim();
+            const keyPath = optionalString(message.keyPath)?.trim();
+            const outputPath = optionalString(message.outputPath)?.trim();
+            const password = normalizePassword(optionalString(message.password));
 
             switch (message.action) {
                 case 'pemToDer':
@@ -167,7 +189,7 @@ export class CertificateOperationsPanel {
                     if (!bundlePath) {
                         throw new Error('Bundle file path is required.');
                     }
-                    const result = inspectPkcs12File(bundlePath, password);
+                    const result = await inspectPkcs12File(bundlePath, password);
                     this.postTextResult('convert', {
                         title: 'PKCS#12 Inspection',
                         summary: result.summary,
@@ -181,7 +203,7 @@ export class CertificateOperationsPanel {
                     if (!bundlePath) {
                         throw new Error('Bundle file path is required.');
                     }
-                    const result = inspectPkcs7File(bundlePath);
+                    const result = await inspectPkcs7File(bundlePath);
                     this.postTextResult('convert', {
                         title: 'PKCS#7 Inspection',
                         summary: result.summary,
@@ -219,36 +241,31 @@ export class CertificateOperationsPanel {
                     return;
                 }
                 default:
-                    throw new Error(`Unsupported conversion action: ${message.action}`);
+                    throw new Error(`Unsupported conversion action: ${String(message.action)}`);
             }
         } catch (error) {
             this.postError('convert', 'Conversion action failed.', error);
         }
     }
 
-    private handleKeystoreAction(message: {
-        action: string;
-        keystorePath?: string;
-        keystoreType?: KeystoreType;
-        alias?: string;
-        password?: string;
-        certificateOutputPath?: string;
-        keyOutputPath?: string;
-        pkcs12OutputPath?: string;
-    }) {
+    private async handleKeystoreAction(message: Record<string, unknown>) {
         try {
-            const keystorePath = message.keystorePath?.trim();
+            const keystorePath = optionalString(message.keystorePath)?.trim();
             if (!keystorePath) {
                 throw new Error('Keystore path is required.');
             }
 
-            const alias = message.alias?.trim();
-            const password = normalizePassword(message.password);
-            const keystoreType = this.resolveKeystoreType(keystorePath, message.keystoreType || 'auto');
+            const alias = optionalString(message.alias)?.trim();
+            const password = normalizePassword(optionalString(message.password));
+            const requestedKeystoreType = message.keystoreType;
+            const keystoreType = this.resolveKeystoreType(
+                keystorePath,
+                requestedKeystoreType === 'jks' || requestedKeystoreType === 'pkcs12' ? requestedKeystoreType : 'auto'
+            );
 
             switch (message.action) {
                 case 'listAliases': {
-                    const result = listJksAliases(keystorePath, password);
+                    const result = await listJksAliases(keystorePath, password);
                     this.postTextResult('keystore', {
                         title: 'JKS Alias Listing',
                         summary: result.summary,
@@ -275,12 +292,19 @@ export class CertificateOperationsPanel {
                     });
                     return;
                 case 'exportPemPair': {
-                    const certificateOutputPath = message.certificateOutputPath?.trim() || 'certificate.pem';
-                    const keyOutputPath = message.keyOutputPath?.trim() || 'private-key.pem';
-                    const pkcs12OutputPath = message.pkcs12OutputPath?.trim() || 'keystore-export.p12';
+                    const certificateOutputPath = optionalString(message.certificateOutputPath)?.trim() || 'certificate.pem';
+                    const keyOutputPath = optionalString(message.keyOutputPath)?.trim() || 'private-key.pem';
+                    const pkcs12OutputPath = optionalString(message.pkcs12OutputPath)?.trim() || 'keystore-export.p12';
                     const command =
                         keystoreType === 'jks'
-                            ? this.buildJksPemExportCommand(keystorePath, alias, pkcs12OutputPath, certificateOutputPath, keyOutputPath, password)
+                            ? this.buildJksPemExportCommand(
+                                  keystorePath,
+                                  alias,
+                                  pkcs12OutputPath,
+                                  certificateOutputPath,
+                                  keyOutputPath,
+                                  password
+                              )
                             : buildPkcs12PemExportCommands(keystorePath, certificateOutputPath, keyOutputPath, password);
 
                     const warnings = ['The private key command writes an unencrypted PEM key. Protect the output file.'];
@@ -302,7 +326,7 @@ export class CertificateOperationsPanel {
                     return;
                 }
                 default:
-                    throw new Error(`Unsupported keystore action: ${message.action}`);
+                    throw new Error(`Unsupported keystore action: ${String(message.action)}`);
             }
         } catch (error) {
             this.postError('keystore', 'Keystore action failed.', error);
@@ -345,10 +369,10 @@ export class CertificateOperationsPanel {
         this.pendingLaunchRequest = undefined;
     }
 
-    private postCapabilities() {
+    private async postCapabilities() {
         this.panel.webview.postMessage({
             command: 'capabilities',
-            payload: this.capabilities,
+            payload: await this.capabilities,
         });
     }
 
@@ -362,10 +386,11 @@ export class CertificateOperationsPanel {
             warnings?: string[];
         }
     ) {
-        this.panel.webview.postMessage({
+        this.lastResult = {
             command: tab === 'convert' ? 'convertResult' : 'keystoreResult',
             payload,
-        });
+        };
+        this.panel.webview.postMessage(this.lastResult);
     }
 
     private postError(tab: OperationTab, summary: string, error: unknown) {
@@ -381,9 +406,8 @@ export class CertificateOperationsPanel {
     }
 
     private getWebviewContent(): string {
-        const webview = this.panel.webview;
         const nonce = crypto.randomBytes(16).toString('base64url');
-        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
+        const csp = `default-src 'none'; base-uri 'none'; form-action 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -547,19 +571,19 @@ export class CertificateOperationsPanel {
             border: 1px solid;
         }
         .badge.valid {
-            background-color: rgba(76, 175, 80, 0.1);
-            color: #4caf50;
-            border-color: #4caf50;
+            background-color: var(--vscode-diffEditor-insertedTextBackground, transparent);
+            color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+            border-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
         }
         .badge.expiring {
-            background-color: rgba(255, 152, 0, 0.1);
-            color: #ff9800;
-            border-color: #ff9800;
+            background-color: var(--vscode-inputValidation-warningBackground, transparent);
+            color: var(--vscode-editorWarning-foreground);
+            border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
         }
         .badge.expired {
-            background-color: rgba(244, 67, 54, 0.1);
-            color: #f44336;
-            border-color: #f44336;
+            background-color: var(--vscode-inputValidation-errorBackground, transparent);
+            color: var(--vscode-editorError-foreground);
+            border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground));
         }
         .badge-icon {
             width: 12px;
@@ -585,42 +609,42 @@ export class CertificateOperationsPanel {
     <h1>Certificate Conversion & Keystore</h1>
     <p class="lead">Convert certificate formats, inspect PKCS bundles, and generate keystore export commands for JKS, PFX, and PKCS#12 files.</p>
 
-    <div class="tabs">
-        <button class="tab active" data-tab="convert">Convert</button>
-        <button class="tab" data-tab="keystore">Keystore</button>
+    <div class="tabs" role="tablist" aria-label="Certificate operation tools">
+        <button id="convert-tab" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="convert" data-tab="convert">Convert</button>
+        <button id="keystore-tab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="keystore" tabindex="-1" data-tab="keystore">Keystore</button>
     </div>
 
-    <section class="tab-content active" id="convert">
+    <section class="tab-content active" id="convert" role="tabpanel" aria-labelledby="convert-tab">
         <div class="panel">
             <div class="form-grid">
                 <div class="field">
                     <label for="convert-bundle-path">Bundle File Path</label>
-                    <input id="convert-bundle-path" type="text" placeholder="/path/to/bundle.p12 or bundle.p7b">
+                    <input id="convert-bundle-path" type="text" maxlength="4096" placeholder="/path/to/bundle.p12 or bundle.p7b">
                     <div class="actions">
                         <button class="secondary" data-pick-target="convert-bundle-path">Choose Bundle File</button>
                     </div>
                 </div>
                 <div class="field">
                     <label for="convert-password">Bundle Password (optional)</label>
-                    <input id="convert-password" type="password" placeholder="PKCS#12 password">
+                    <input id="convert-password" type="password" maxlength="1024" autocomplete="off" placeholder="PKCS#12 password">
                 </div>
                 <div class="field">
                     <label for="convert-cert-path">Certificate Path</label>
-                    <input id="convert-cert-path" type="text" placeholder="/path/to/certificate.crt">
+                    <input id="convert-cert-path" type="text" maxlength="4096" placeholder="/path/to/certificate.crt">
                     <div class="actions">
                         <button class="secondary" data-pick-target="convert-cert-path">Choose Certificate</button>
                     </div>
                 </div>
                 <div class="field">
                     <label for="convert-key-path">Private Key Path</label>
-                    <input id="convert-key-path" type="text" placeholder="/path/to/private.key">
+                    <input id="convert-key-path" type="text" maxlength="4096" placeholder="/path/to/private.key">
                     <div class="actions">
                         <button class="secondary" data-pick-target="convert-key-path">Choose Key</button>
                     </div>
                 </div>
                 <div class="field">
                     <label for="convert-output-path">Output Path</label>
-                    <input id="convert-output-path" type="text" placeholder="certificate.p12">
+                    <input id="convert-output-path" type="text" maxlength="4096" placeholder="certificate.p12">
                 </div>
             </div>
             <div class="actions">
@@ -632,15 +656,15 @@ export class CertificateOperationsPanel {
                 <button class="ghost" id="build-pkcs12-btn">Build PKCS#12</button>
             </div>
         </div>
-        <div class="result-panel" id="convert-result"></div>
+        <div class="result-panel" id="convert-result" aria-live="polite"></div>
     </section>
 
-    <section class="tab-content" id="keystore">
+    <section class="tab-content" id="keystore" role="tabpanel" aria-labelledby="keystore-tab" hidden>
         <div class="panel">
             <div class="form-grid">
                 <div class="field-wide">
                     <label for="keystore-path">Keystore / PFX / PKCS#12 Path</label>
-                    <input id="keystore-path" type="text" placeholder="/path/to/keystore.jks, bundle.pfx, or bundle.p12">
+                    <input id="keystore-path" type="text" maxlength="4096" placeholder="/path/to/keystore.jks, bundle.pfx, or bundle.p12">
                     <div class="actions">
                         <button class="secondary" data-pick-target="keystore-path">Choose Store File</button>
                     </div>
@@ -655,23 +679,23 @@ export class CertificateOperationsPanel {
                 </div>
                 <div class="field">
                     <label for="keystore-alias">Alias (required for JKS key export)</label>
-                    <input id="keystore-alias" type="text" placeholder="certificate-alias">
+                    <input id="keystore-alias" type="text" maxlength="1024" placeholder="certificate-alias">
                 </div>
                 <div class="field">
                     <label for="keystore-password">Store Password (optional)</label>
-                    <input id="keystore-password" type="password">
+                    <input id="keystore-password" type="password" maxlength="1024" autocomplete="off">
                 </div>
                 <div class="field">
                     <label for="keystore-cert-output">Certificate PEM Output</label>
-                    <input id="keystore-cert-output" type="text" placeholder="certificate.pem">
+                    <input id="keystore-cert-output" type="text" maxlength="4096" placeholder="certificate.pem">
                 </div>
                 <div class="field">
                     <label for="keystore-key-output">Private Key PEM Output</label>
-                    <input id="keystore-key-output" type="text" placeholder="private-key.pem">
+                    <input id="keystore-key-output" type="text" maxlength="4096" placeholder="private-key.pem">
                 </div>
                 <div class="field">
                     <label for="keystore-p12-output">Intermediate PKCS#12 Output</label>
-                    <input id="keystore-p12-output" type="text" placeholder="keystore-export.p12">
+                    <input id="keystore-p12-output" type="text" maxlength="4096" placeholder="keystore-export.p12">
                 </div>
             </div>
             <div class="actions">
@@ -682,7 +706,7 @@ export class CertificateOperationsPanel {
             </div>
             <div class="capabilities" id="capabilities"></div>
         </div>
-        <div class="result-panel" id="keystore-result"></div>
+        <div class="result-panel" id="keystore-result" aria-live="polite"></div>
     </section>
 
     <script nonce="${nonce}">
@@ -698,10 +722,15 @@ export class CertificateOperationsPanel {
 
         function setActiveTab(tabName) {
             document.querySelectorAll('.tab').forEach((tab) => {
-                tab.classList.toggle('active', tab.dataset.tab === tabName);
+                const isActive = tab.dataset.tab === tabName;
+                tab.classList.toggle('active', isActive);
+                tab.setAttribute('aria-selected', String(isActive));
+                tab.tabIndex = isActive ? 0 : -1;
             });
             document.querySelectorAll('.tab-content').forEach((content) => {
-                content.classList.toggle('active', content.id === tabName);
+                const isActive = content.id === tabName;
+                content.classList.toggle('active', isActive);
+                content.toggleAttribute('hidden', !isActive);
             });
         }
 
@@ -737,7 +766,7 @@ export class CertificateOperationsPanel {
             };
             const status = config[kind] || config.warning;
             return '<span class="badge ' + status.className + '">' +
-                '<svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' + status.icon + '</svg>' +
+                '<svg class="badge-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' + status.icon + '</svg>' +
                 escapeHtml(text) +
             '</span>';
         }
@@ -784,7 +813,10 @@ export class CertificateOperationsPanel {
                 command: 'convertAction',
                 action,
                 bundlePath: document.getElementById('convert-bundle-path').value,
-                password: document.getElementById('convert-password').value,
+                password:
+                    action === 'inspectPkcs12' || action === 'buildPkcs12'
+                        ? document.getElementById('convert-password').value
+                        : undefined,
                 certPath: document.getElementById('convert-cert-path').value,
                 keyPath: document.getElementById('convert-key-path').value,
                 outputPath: document.getElementById('convert-output-path').value,
@@ -805,8 +837,39 @@ export class CertificateOperationsPanel {
             };
         }
 
-        document.querySelectorAll('.tab').forEach((tab) => {
+        function postConvertAction(action) {
+            vscode.postMessage(getConvertPayload(action));
+            if (action === 'inspectPkcs12' || action === 'buildPkcs12') {
+                document.getElementById('convert-password').value = '';
+            }
+        }
+
+        function postKeystoreAction(action) {
+            vscode.postMessage(getKeystorePayload(action));
+            document.getElementById('keystore-password').value = '';
+        }
+
+        const tabs = Array.from(document.querySelectorAll('.tab'));
+        tabs.forEach((tab) => {
             tab.addEventListener('click', () => setActiveTab(tab.dataset.tab));
+            tab.addEventListener('keydown', (event) => {
+                const currentIndex = tabs.indexOf(tab);
+                let nextIndex;
+                if (event.key === 'ArrowRight') {
+                    nextIndex = (currentIndex + 1) % tabs.length;
+                } else if (event.key === 'ArrowLeft') {
+                    nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+                } else if (event.key === 'Home') {
+                    nextIndex = 0;
+                } else if (event.key === 'End') {
+                    nextIndex = tabs.length - 1;
+                } else {
+                    return;
+                }
+                event.preventDefault();
+                setActiveTab(tabs[nextIndex].dataset.tab);
+                tabs[nextIndex].focus();
+            });
         });
 
         document.querySelectorAll('[data-pick-target]').forEach((button) => {
@@ -834,35 +897,35 @@ export class CertificateOperationsPanel {
         });
 
         document.getElementById('pem-to-der-btn').addEventListener('click', () => {
-            vscode.postMessage(getConvertPayload('pemToDer'));
+            postConvertAction('pemToDer');
         });
         document.getElementById('der-to-pem-btn').addEventListener('click', () => {
-            vscode.postMessage(getConvertPayload('derToPem'));
+            postConvertAction('derToPem');
         });
         document.getElementById('inspect-pkcs12-btn').addEventListener('click', () => {
-            vscode.postMessage(getConvertPayload('inspectPkcs12'));
+            postConvertAction('inspectPkcs12');
         });
         document.getElementById('inspect-pkcs7-btn').addEventListener('click', () => {
-            vscode.postMessage(getConvertPayload('inspectPkcs7'));
+            postConvertAction('inspectPkcs7');
         });
         document.getElementById('inspect-csr-btn').addEventListener('click', () => {
-            vscode.postMessage(getConvertPayload('inspectCsr'));
+            postConvertAction('inspectCsr');
         });
         document.getElementById('build-pkcs12-btn').addEventListener('click', () => {
-            vscode.postMessage(getConvertPayload('buildPkcs12'));
+            postConvertAction('buildPkcs12');
         });
 
         document.getElementById('jks-list-btn').addEventListener('click', () => {
-            vscode.postMessage(getKeystorePayload('listAliases'));
+            postKeystoreAction('listAliases');
         });
         document.getElementById('jks-export-btn').addEventListener('click', () => {
-            vscode.postMessage(getKeystorePayload('exportCert'));
+            postKeystoreAction('exportCert');
         });
         document.getElementById('jks-convert-btn').addEventListener('click', () => {
-            vscode.postMessage(getKeystorePayload('convertToPkcs12'));
+            postKeystoreAction('convertToPkcs12');
         });
         document.getElementById('export-pem-pair-btn').addEventListener('click', () => {
-            vscode.postMessage(getKeystorePayload('exportPemPair'));
+            postKeystoreAction('exportPemPair');
         });
 
         window.addEventListener('message', (event) => {

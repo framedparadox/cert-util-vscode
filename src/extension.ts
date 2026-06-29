@@ -1,14 +1,9 @@
 import * as vscode from 'vscode';
+import { parseRemoteTarget } from './certificates/externalTools';
 import { CertificateExpiryPanel, CertificateOperationsPanel, CertificatePanel } from './panels';
 import { CertificateToolsProvider } from './providers';
 
 export function activate(context: vscode.ExtensionContext) {
-    const certificateToolsProvider = new CertificateToolsProvider(context.extensionUri);
-    const sidebarViewProvider = vscode.window.registerWebviewViewProvider(
-        'certificateUtilToolsView',
-        certificateToolsProvider
-    );
-
     const certificateCommand = vscode.commands.registerCommand('certificateUtil.openCertificateTools', () => {
         CertificatePanel.render(context.extensionUri);
     });
@@ -68,7 +63,14 @@ export function activate(context: vscode.ExtensionContext) {
         const target = await vscode.window.showInputBox({
             prompt: 'Enter a remote TLS endpoint',
             placeHolder: 'example.com:443',
-            validateInput: (value) => (!value.trim() ? 'A host name is required.' : undefined),
+            validateInput: (value) => {
+                try {
+                    parseRemoteTarget(value);
+                    return undefined;
+                } catch (error) {
+                    return error instanceof Error ? error.message : 'Enter a valid host name or IP address.';
+                }
+            },
         });
 
         if (!target) {
@@ -85,6 +87,11 @@ export function activate(context: vscode.ExtensionContext) {
     const certificateExpiryCommand = vscode.commands.registerCommand('certificateUtil.openExpiryChecker', () => {
         CertificateExpiryPanel.render(context.extensionUri);
     });
+
+    const sidebarViewProvider = vscode.window.registerWebviewViewProvider(
+        'certificateUtilToolsView',
+        new CertificateToolsProvider(context.extensionUri)
+    );
 
     context.subscriptions.push(
         sidebarViewProvider,

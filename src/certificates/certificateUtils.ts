@@ -5,17 +5,10 @@ import * as path from 'path';
 
 export const SUPPORTED_CERTIFICATE_EXTENSIONS = ['.crt', '.cer', '.cert', '.pem', '.der', '.ca-bundle', '.ca', '.bundle'];
 export const CLASSIFIED_ARTIFACT_EXTENSIONS = ['.jks', '.p12', '.pfx', '.p7b', '.p7c', '.p7s', '.csr', '.key'];
+export const MAX_CERTIFICATE_FILE_BYTES = 10 * 1024 * 1024;
 
 export type CertificateStatus = 'valid' | 'expiring' | 'expired';
-export type CertificateArtifactKind =
-    | 'x509-cert'
-    | 'cert-chain'
-    | 'csr'
-    | 'pkcs12'
-    | 'pkcs7'
-    | 'private-key'
-    | 'jks'
-    | 'unknown';
+export type CertificateArtifactKind = 'x509-cert' | 'cert-chain' | 'csr' | 'pkcs12' | 'pkcs7' | 'private-key' | 'jks' | 'unknown';
 export type CertificateInputEncoding = 'PEM' | 'DER' | 'P12' | 'P7B' | 'JKS' | 'TEXT' | 'UNKNOWN';
 export type CertificateInputSourceKind = 'pasted' | 'file' | 'active-editor' | 'remote';
 export type ValidationSeverity = 'error' | 'warning' | 'info';
@@ -67,7 +60,6 @@ export interface ParsedCertificateDetails {
     infoAccessEntries: string[];
     ocspUrls: string[];
     caIssuersUrls: string[];
-    crlDistributionPoints: string[];
     type: string;
     algorithm: string;
     format: string;
@@ -228,7 +220,10 @@ export function parseCertificateInputFromText(content: string, source: Certifica
     return parseArtifact({ source, content });
 }
 
-export function parseCertificateInputFromFile(filePath: string, sourceKind: CertificateInputSourceKind = 'file'): ParsedCertificateArtifact {
+export function parseCertificateInputFromFile(
+    filePath: string,
+    sourceKind: CertificateInputSourceKind = 'file'
+): ParsedCertificateArtifact {
     return parseArtifact({
         source: {
             kind: sourceKind,
@@ -305,7 +300,9 @@ export function validateArtifact(artifact: ParsedCertificateArtifact, options: V
     issues.push({
         severity: 'info',
         code: leaf.isCertificateAuthority ? 'certificate-authority' : 'leaf-certificate',
-        message: leaf.isCertificateAuthority ? 'Certificate is marked as a CA certificate.' : 'Certificate is marked as a leaf certificate.',
+        message: leaf.isCertificateAuthority
+            ? 'Certificate is marked as a CA certificate.'
+            : 'Certificate is marked as a leaf certificate.',
     });
 
     if (options.hostname) {
@@ -496,7 +493,7 @@ function parseArtifact(options: ArtifactParseOptions): ParsedCertificateArtifact
     const filePath = options.filePath;
     const extension = filePath ? path.extname(filePath).toLowerCase() : '';
     const encoding = detectEncoding(filePath);
-    const rawContent = options.content ?? (filePath ? fs.readFileSync(filePath) : '');
+    const rawContent = options.content ?? (filePath ? readCertificateFile(filePath) : '');
     const rawText = typeof rawContent === 'string' ? rawContent : rawContent.toString('utf8');
     const pemBlocks = typeof rawContent === 'string' ? matchPemBlocks(rawContent) : matchPemBlocks(rawText);
     const blockTypes = [...new Set(pemBlocks.map((block) => block.type))];
@@ -534,6 +531,14 @@ function parseArtifact(options: ArtifactParseOptions): ParsedCertificateArtifact
     };
 }
 
+function readCertificateFile(filePath: string): Buffer {
+    const size = fs.statSync(filePath).size;
+    if (size > MAX_CERTIFICATE_FILE_BYTES) {
+        throw new Error(`Certificate input exceeds the ${MAX_CERTIFICATE_FILE_BYTES / (1024 * 1024)} MB file limit.`);
+    }
+    return fs.readFileSync(filePath);
+}
+
 function parseCertificatesFromInput(
     rawContent: string | Buffer,
     extension: string,
@@ -567,9 +572,6 @@ function parseCertificatesFromInput(
 }
 
 function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: string, format: string): ParsedCertificateDetails {
-    const certWithExtendedProperties = cert as crypto.X509Certificate & {
-        signatureAlgorithm?: string;
-    };
     const legacy = cert.toLegacyObject() as {
         ca?: boolean;
         bits?: number;
@@ -587,6 +589,10 @@ function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: strin
     const publicKeyDetails = cert.publicKey.asymmetricKeyType
         ? cert.publicKey.asymmetricKeyType.toUpperCase()
         : legacy.asn1Curve || legacy.nistCurve || 'Unknown';
+    const bits = typeof legacy.bits === 'number' ? legacy.bits : undefined;
+    // Parsed from the certificate DER because Node's X509Certificate does not expose the signature
+    // algorithm as a property.
+    const signatureAlgorithm = extractSignatureAlgorithm(cert);
 
     return {
         pem: pem.includes('-----BEGIN') ? pem : cert.toString(),
@@ -608,24 +614,21 @@ function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: strin
         infoAccessEntries: splitMultilineField(infoAccess),
         ocspUrls: extractInfoAccessValues(infoAccess, 'OCSP'),
         caIssuersUrls: extractInfoAccessValues(infoAccess, 'CA Issuers'),
-        crlDistributionPoints: [],
         type: determineCertificateType(cert, keyUsage, extendedKeyUsage),
-        algorithm: extractAlgorithm(cert),
+        // Key algorithm + strength (e.g. "RSA (2048-bit)") — the at-a-glance summary used by the
+        // expiry table and the legacy CertificateDetails view, distinct from signatureAlgorithm.
+        algorithm: formatKeyAlgorithm(publicKeyDetails, bits),
         format,
-        signatureAlgorithm: certWithExtendedProperties.signatureAlgorithm || 'Unknown',
+        signatureAlgorithm,
         publicKeyAlgorithm: publicKeyDetails,
-        bits: typeof legacy.bits === 'number' ? legacy.bits : undefined,
+        bits,
         isCertificateAuthority: cert.ca,
         isSelfSigned: isCertificateSelfSigned(cert),
         purposeHints,
     };
 }
 
-function determineCertificateType(
-    cert: crypto.X509Certificate,
-    keyUsage: string[],
-    extendedKeyUsage: string[]
-): string {
+function determineCertificateType(cert: crypto.X509Certificate, keyUsage: string[], extendedKeyUsage: string[]): string {
     // Classify purely by OID-based Extended Key Usage values. Subject-string heuristics
     // (e.g. subject.includes('code')) are unreliable because domain names and org names
     // can match by coincidence, leading to wrong classifications.
@@ -648,13 +651,6 @@ function determineCertificateType(
     }
 
     return 'TLS/SSL';
-}
-
-function extractAlgorithm(cert: crypto.X509Certificate): string {
-    // `signatureAlgorithm` is available on Node 18.13+ / 20+.  Fall back gracefully on
-    // older runtimes rather than reporting the fingerprint hash as the cert algorithm.
-    const sigAlg = (cert as crypto.X509Certificate & { signatureAlgorithm?: string }).signatureAlgorithm;
-    return sigAlg || 'Unknown';
 }
 
 function generateCertificateId(filePath: string, serialNumber: string): string {
@@ -784,6 +780,113 @@ function isCertificateSelfSigned(cert: crypto.X509Certificate): boolean {
     } catch {
         return false;
     }
+}
+
+/** Formats the public-key algorithm and strength for display, e.g. "RSA (2048-bit)" or "EC". */
+function formatKeyAlgorithm(publicKeyAlgorithm: string, bits?: number): string {
+    if (publicKeyAlgorithm === 'Unknown') {
+        return 'Unknown';
+    }
+    return typeof bits === 'number' ? `${publicKeyAlgorithm} (${bits}-bit)` : publicKeyAlgorithm;
+}
+
+const SIGNATURE_ALGORITHM_OIDS: Record<string, string> = {
+    '1.2.840.113549.1.1.4': 'md5WithRSAEncryption',
+    '1.2.840.113549.1.1.5': 'sha1WithRSAEncryption',
+    '1.2.840.113549.1.1.11': 'sha256WithRSAEncryption',
+    '1.2.840.113549.1.1.12': 'sha384WithRSAEncryption',
+    '1.2.840.113549.1.1.13': 'sha512WithRSAEncryption',
+    '1.2.840.113549.1.1.10': 'RSASSA-PSS',
+    '1.2.840.10045.4.1': 'ecdsa-with-SHA1',
+    '1.2.840.10045.4.3.2': 'ecdsa-with-SHA256',
+    '1.2.840.10045.4.3.3': 'ecdsa-with-SHA384',
+    '1.2.840.10045.4.3.4': 'ecdsa-with-SHA512',
+    '1.3.101.112': 'Ed25519',
+    '1.3.101.113': 'Ed448',
+};
+
+interface DerElement {
+    tag: number;
+    contentStart: number;
+    end: number;
+}
+
+/**
+ * Reads the signature AlgorithmIdentifier OID directly from the certificate DER. Node's
+ * X509Certificate does not expose the signature algorithm, so we parse the minimal ASN.1 needed:
+ * Certificate ::= SEQUENCE { tbsCertificate SEQUENCE, signatureAlgorithm SEQUENCE { algorithm OID,
+ * ... }, signatureValue BIT STRING }. Returns a friendly name when the OID is recognized, otherwise
+ * the dotted OID, or 'Unknown' if the structure cannot be parsed (e.g. malformed input).
+ */
+function extractSignatureAlgorithm(cert: crypto.X509Certificate): string {
+    try {
+        const der = cert.raw;
+        const certificate = readDerElement(der, 0);
+        if (certificate.tag !== 0x30) {
+            return 'Unknown';
+        }
+        // First element of the certificate is tbsCertificate; the signatureAlgorithm follows it.
+        const tbsCertificate = readDerElement(der, certificate.contentStart);
+        const signatureAlgorithm = readDerElement(der, tbsCertificate.end);
+        if (signatureAlgorithm.tag !== 0x30) {
+            return 'Unknown';
+        }
+        const oid = readDerElement(der, signatureAlgorithm.contentStart);
+        if (oid.tag !== 0x06) {
+            return 'Unknown';
+        }
+        const oidString = decodeOid(der.subarray(oid.contentStart, oid.end));
+        return SIGNATURE_ALGORITHM_OIDS[oidString] ?? oidString;
+    } catch {
+        return 'Unknown';
+    }
+}
+
+function readDerElement(buffer: Buffer, offset: number): DerElement {
+    if (offset + 1 >= buffer.length) {
+        throw new Error('DER element is truncated.');
+    }
+    const tag = buffer[offset];
+    let cursor = offset + 1;
+    let length = buffer[cursor++];
+    if (length & 0x80) {
+        const byteCount = length & 0x7f;
+        if (byteCount === 0 || byteCount > 4) {
+            throw new Error('Unsupported DER length encoding.');
+        }
+        length = 0;
+        for (let i = 0; i < byteCount; i += 1) {
+            length = length * 256 + buffer[cursor++];
+        }
+    }
+    const contentStart = cursor;
+    const end = contentStart + length;
+    if (end > buffer.length) {
+        throw new Error('DER element exceeds buffer length.');
+    }
+    return { tag, contentStart, end };
+}
+
+function decodeOid(bytes: Buffer): string {
+    if (!bytes.length) {
+        throw new Error('Empty OID.');
+    }
+    const subIdentifiers: number[] = [];
+    let value = 0;
+    for (const byte of bytes) {
+        value = value * 128 + (byte & 0x7f);
+        if ((byte & 0x80) === 0) {
+            subIdentifiers.push(value);
+            value = 0;
+        }
+    }
+    if (!subIdentifiers.length) {
+        throw new Error('Invalid OID encoding.');
+    }
+    const first = subIdentifiers[0];
+    const arc1 = first >= 80 ? 2 : Math.floor(first / 40);
+    const arc2 = first >= 80 ? first - 80 : first % 40;
+    return [arc1, arc2, ...subIdentifiers.slice(1)].join('.');
 }
 
 function toCertificateDetails(details: ParsedCertificateDetails): CertificateDetails {

@@ -2,7 +2,7 @@
     "name": "certi",
     "displayName": "Certificate Utility",
     "description": "Certificate utilities for validating, decoding, inspecting, and checking X.509 certificate expiration from VS Code.",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "publisher": "framedparadox",
     "license": "MIT",
     "icon": "resources/certificate.png",
@@ -29,10 +29,21 @@
     "engines": {
         "vscode": "^1.105.0"
     },
+    "extensionKind": [
+        "workspace"
+    ],
+    "capabilities": {
+        "untrustedWorkspaces": {
+            "supported": true
+        },
+        "virtualWorkspaces": {
+            "supported": false,
+            "description": "Certificate file access and external OpenSSL/keytool operations require a local or remote workspace file system."
+        }
+    },
     "categories": [
         "Other"
     ],
-    "activationEvents": [],
     "main": "./dist/extension.js",
     "contributes": {
         "viewsContainers": {
@@ -57,62 +68,74 @@
         "commands": [
             {
                 "command": "certificateUtil.openCertificateTools",
-                "title": "Certificate Tools",
+                "title": "Open Certificate Tools",
+                "category": "Certificate Utility",
                 "icon": "$(shield)"
             },
             {
                 "command": "certificateUtil.openCertificateOperations",
-                "title": "Certificate Conversion & Keystore",
+                "title": "Open Certificate Conversion & Keystore",
+                "category": "Certificate Utility",
                 "icon": "$(key)"
             },
             {
                 "command": "certificateUtil.inspectActiveCertificate",
                 "title": "Inspect Active Certificate",
+                "category": "Certificate Utility",
                 "icon": "$(file-code)"
             },
             {
                 "command": "certificateUtil.inspectCertificateFile",
                 "title": "Inspect Certificate File",
+                "category": "Certificate Utility",
                 "icon": "$(folder-opened)"
             },
             {
                 "command": "certificateUtil.inspectRemoteCertificate",
                 "title": "Inspect Remote Certificate",
+                "category": "Certificate Utility",
                 "icon": "$(globe)"
             },
             {
                 "command": "certificateUtil.openInspectTool",
                 "title": "Open Inspect Tool",
+                "category": "Certificate Utility",
                 "icon": "$(search)"
             },
             {
                 "command": "certificateUtil.openValidateTool",
                 "title": "Open Validate Tool",
+                "category": "Certificate Utility",
                 "icon": "$(verified)"
             },
             {
                 "command": "certificateUtil.openChainTool",
                 "title": "Open Chain Tool",
+                "category": "Certificate Utility",
                 "icon": "$(list-tree)"
             },
             {
                 "command": "certificateUtil.openConvertTool",
                 "title": "Open Convert Tool",
+                "category": "Certificate Utility",
                 "icon": "$(arrow-swap)"
             },
             {
                 "command": "certificateUtil.openKeystoreTool",
                 "title": "Open Keystore Tool",
+                "category": "Certificate Utility",
                 "icon": "$(database)"
             },
             {
                 "command": "certificateUtil.openRemoteTool",
                 "title": "Open Remote Tool",
+                "category": "Certificate Utility",
                 "icon": "$(globe)"
             },
             {
                 "command": "certificateUtil.openExpiryChecker",
-                "title": "Certificate Expiry Checker",
+                "title": "Open Certificate Expiry Checker",
+                "category": "Certificate Utility",
                 "icon": "$(calendar)"
             }
         ]
@@ -130,22 +153,31 @@
         "lint:fix": "eslint src --fix",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
+        "check": "npm run format:check && npm run lint && npm run compile-tests && npm run package",
         "test": "vscode-test",
-        "build": "webpack --mode development"
+        "build": "webpack --mode development",
+        "package:vsix": "vsce package --no-dependencies --out certi.vsix"
     },
     "devDependencies": {
         "@types/mocha": "^10.0.10",
         "@types/node": "22.x",
-        "@types/vscode": "^1.105.0",
+        "@types/vscode": "1.105.0",
         "@typescript-eslint/eslint-plugin": "^8.45.0",
         "@typescript-eslint/parser": "^8.45.0",
-        "@vscode/test-cli": "^0.0.11",
-        "@vscode/test-electron": "^2.5.2",
+        "@vscode/test-cli": "^0.0.15",
+        "@vscode/test-electron": "^3.0.0",
+        "@vscode/vsce": "^3.9.2",
         "eslint": "^9.36.0",
         "prettier": "^3.6.2",
         "ts-loader": "^9.5.4",
         "typescript": "^5.9.3",
         "webpack": "^5.102.0",
         "webpack-cli": "^6.0.1"
+    },
+    "overrides": {
+        "mocha": {
+            "diff": "9.0.0",
+            "serialize-javascript": "7.0.6"
+        }
     }
 }

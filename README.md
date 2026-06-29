@@ -1,12 +1,12 @@
 # Certificate Utility
 
-Certificate Utility is a VS Code extension for inspecting certificate artifacts without leaving the editor. It provides a compact Activity Bar launcher, certificate inspection and validation tools, dedicated conversion and keystore workflows, and an expiry scanner.
+Certificate Utility is a VS Code extension for inspecting certificate artifacts without leaving the editor. It provides certificate inspection and validation tools, dedicated conversion and keystore workflows, and an expiry scanner.
 
 ## Features
 
 ### Certificate Tools
 
-Open `Certificate Utility: Certificate Tools` from the Command Palette or the Certificates Activity Bar view.
+Run `Certificate Utility: Open Certificate Tools` from the Command Palette.
 
 - Inspect pasted PEM content or explicit certificate files. The command surface also supports inspecting the active editor directly.
 - Classify X.509 certificates, certificate bundles, CSRs, private keys, PKCS#7 files, PKCS#12 files, and JKS keystores.
@@ -18,7 +18,7 @@ Open `Certificate Utility: Certificate Tools` from the Command Palette or the Ce
 
 ### Conversion & Keystore
 
-Open `Certificate Utility: Certificate Conversion & Keystore` from the Command Palette or the Certificates Activity Bar view.
+Run `Certificate Utility: Open Certificate Conversion & Keystore` from the Command Palette.
 
 - Build OpenSSL commands for PEM to DER and DER to PEM conversion from explicit file paths.
 - Inspect PKCS#7 and PKCS#12 bundles when OpenSSL is available.
@@ -29,7 +29,7 @@ Open `Certificate Utility: Certificate Conversion & Keystore` from the Command P
 
 ### Certificate Expiry Checker
 
-Open `Certificate Utility: Certificate Expiry Checker` from the Command Palette or the Certificates Activity Bar view.
+Run `Certificate Utility: Open Certificate Expiry Checker` from the Command Palette.
 
 - Select a folder and scan recursively for certificate files.
 - Sort certificates by expiration date.
@@ -62,8 +62,8 @@ The certificate tools workbench also classifies and guides workflows for:
 
 ## Commands
 
-- `certificateUtil.openCertificateTools`: Certificate Tools
-- `certificateUtil.openCertificateOperations`: Certificate Conversion & Keystore
+- `certificateUtil.openCertificateTools`: Open Certificate Tools
+- `certificateUtil.openCertificateOperations`: Open Certificate Conversion & Keystore
 - `certificateUtil.inspectActiveCertificate`: Inspect Active Certificate
 - `certificateUtil.inspectCertificateFile`: Inspect Certificate File
 - `certificateUtil.inspectRemoteCertificate`: Inspect Remote Certificate
@@ -73,7 +73,7 @@ The certificate tools workbench also classifies and guides workflows for:
 - `certificateUtil.openConvertTool`: Open Convert Tool
 - `certificateUtil.openKeystoreTool`: Open Keystore Tool
 - `certificateUtil.openRemoteTool`: Open Remote Tool
-- `certificateUtil.openExpiryChecker`: Certificate Expiry Checker
+- `certificateUtil.openExpiryChecker`: Open Certificate Expiry Checker
 
 ## Requirements
 
@@ -89,9 +89,9 @@ npm run lint
 npm run compile
 npm run compile-tests
 npm test
-npx vsce package --no-dependencies --out certi.vsix
+npm run package:vsix
 ```
 
 ## Privacy
 
-Certificate parsing runs locally inside VS Code. The extension does not upload certificate contents, private keys, or scan results.
+Certificate parsing runs inside the local or remote VS Code extension host. The extension does not upload certificate contents, private keys, or scan results. Remote inspection only makes the outbound TLS connection explicitly requested by the user, and OpenSSL/keytool operations run on the extension host machine.

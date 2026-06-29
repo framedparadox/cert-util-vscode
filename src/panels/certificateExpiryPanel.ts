@@ -2,14 +2,11 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import {
-    SUPPORTED_CERTIFICATE_EXTENSIONS,
-    ScannedCertificate,
-    scanCertificateFile,
-} from '../certificates/certificateUtils';
+import { SUPPORTED_CERTIFICATE_EXTENSIONS, ScannedCertificate, scanCertificateFile } from '../certificates/certificateUtils';
 
 /** Maximum directory recursion depth for the certificate scanner. */
 const MAX_SCAN_DEPTH = 10;
+const MAX_SCAN_FILES = 25000;
 
 export class CertificateExpiryPanel {
     // Private so external code cannot null-out or swap the singleton reference.
@@ -17,6 +14,10 @@ export class CertificateExpiryPanel {
 
     private readonly panel: vscode.WebviewPanel;
     private readonly disposables: vscode.Disposable[] = [];
+    private selectedFolderPath = '';
+    private lastCertificates: ScannedCertificate[] = [];
+    private scanLimitReached = false;
+    private scanInProgress = false;
 
     private constructor(panel: vscode.WebviewPanel) {
         this.panel = panel;
@@ -25,12 +26,25 @@ export class CertificateExpiryPanel {
 
         this.panel.webview.onDidReceiveMessage(
             (message) => {
+                if (typeof message !== 'object' || message === null || typeof message.command !== 'string') {
+                    return;
+                }
+
                 switch (message.command) {
+                    case 'ready':
+                        this.panel.webview.postMessage({
+                            command: 'restoreState',
+                            folderPath: this.selectedFolderPath,
+                            certificates: this.lastCertificates,
+                        });
+                        return;
                     case 'openFolder':
                         void this.handleOpenFolder();
                         return;
                     case 'scanCertificates':
-                        void this.handleScanCertificates(message.folderPath);
+                        if (typeof message.folderPath === 'string') {
+                            void this.handleScanCertificates(message.folderPath);
+                        }
                         return;
                 }
             },
@@ -43,16 +57,10 @@ export class CertificateExpiryPanel {
         if (CertificateExpiryPanel.currentPanel) {
             CertificateExpiryPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
         } else {
-            const panel = vscode.window.createWebviewPanel(
-                'certificateExpiryPanel',
-                'Certificate Expiry Checker',
-                vscode.ViewColumn.One,
-                {
-                    enableScripts: true,
-                    retainContextWhenHidden: true,
-                    localResourceRoots: [extensionUri],
-                }
-            );
+            const panel = vscode.window.createWebviewPanel('certificateExpiryPanel', 'Certificate Expiry Checker', vscode.ViewColumn.One, {
+                enableScripts: true,
+                localResourceRoots: [],
+            });
 
             panel.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icons', 'cert-expiry.svg');
             CertificateExpiryPanel.currentPanel = new CertificateExpiryPanel(panel);
@@ -69,9 +77,10 @@ export class CertificateExpiryPanel {
             });
 
             if (folderUri?.[0]) {
+                this.selectedFolderPath = folderUri[0].fsPath;
                 this.panel.webview.postMessage({
                     command: 'folderSelected',
-                    path: folderUri[0].fsPath,
+                    path: this.selectedFolderPath,
                 });
             }
         } catch (error) {
@@ -80,6 +89,11 @@ export class CertificateExpiryPanel {
     }
 
     private async handleScanCertificates(folderPath: string) {
+        if (this.scanInProgress) {
+            return;
+        }
+        this.scanInProgress = true;
+
         try {
             if (!folderPath?.trim()) {
                 this.postError('Please select a folder path using the "Select Folder" button.');
@@ -100,7 +114,12 @@ export class CertificateExpiryPanel {
                 return;
             }
 
+            this.scanLimitReached = false;
             const files = await this.getAllFiles(folderPath);
+            if (this.scanLimitReached) {
+                this.postError(`The folder contains more than ${MAX_SCAN_FILES.toLocaleString()} files. Select a narrower folder.`);
+                return;
+            }
             const certificates: ScannedCertificate[] = [];
 
             for (const file of files) {
@@ -121,12 +140,16 @@ export class CertificateExpiryPanel {
                 return;
             }
 
+            this.selectedFolderPath = folderPath;
+            this.lastCertificates = certificates;
             this.panel.webview.postMessage({
                 command: 'scanResult',
                 certificates,
             });
         } catch (error) {
             this.postError(`Failed to scan folder: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            this.scanInProgress = false;
         }
     }
 
@@ -135,24 +158,27 @@ export class CertificateExpiryPanel {
      * Uses async FS APIs so the extension host event loop is not blocked on large trees.
      * Symlinked directories are skipped to prevent infinite loops.
      */
-    private async getAllFiles(dirPath: string, depth = 0): Promise<string[]> {
-        if (depth > MAX_SCAN_DEPTH) {
-            return [];
+    private async getAllFiles(dirPath: string, depth = 0, results: string[] = []): Promise<string[]> {
+        if (depth > MAX_SCAN_DEPTH || this.scanLimitReached) {
+            return results;
         }
 
         let entries: fs.Dirent[];
         try {
             entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
         } catch {
-            return [];
+            return results;
         }
 
-        const results: string[] = [];
         for (const entry of entries) {
+            if (results.length >= MAX_SCAN_FILES) {
+                this.scanLimitReached = true;
+                break;
+            }
+
             const fullPath = path.join(dirPath, entry.name);
             if (entry.isDirectory() && !entry.isSymbolicLink()) {
-                const nested = await this.getAllFiles(fullPath, depth + 1);
-                results.push(...nested);
+                await this.getAllFiles(fullPath, depth + 1, results);
             } else if (entry.isFile()) {
                 results.push(fullPath);
             }
@@ -174,10 +200,9 @@ export class CertificateExpiryPanel {
     }
 
     private getWebviewContent(): string {
-        const webview = this.panel.webview;
         const nonce = crypto.randomBytes(16).toString('base64url');
         // Remove 'unsafe-inline' from style-src — the <style> block carries the nonce instead.
-        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
+        const csp = `default-src 'none'; base-uri 'none'; form-action 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -194,7 +219,7 @@ export class CertificateExpiryPanel {
 
         body {
             padding: 20px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            font-family: var(--vscode-font-family);
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
             line-height: 1.6;
@@ -297,6 +322,23 @@ export class CertificateExpiryPanel {
             background-color: var(--vscode-list-hoverBackground);
         }
 
+        button:focus-visible {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: 2px;
+        }
+
+        .visually-hidden {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
         .tabs {
             display: flex;
             gap: 4px;
@@ -364,21 +406,21 @@ export class CertificateExpiryPanel {
         }
 
         .badge.valid {
-            background-color: rgba(76, 175, 80, 0.1);
-            color: #4caf50;
-            border-color: #4caf50;
+            background-color: var(--vscode-diffEditor-insertedTextBackground, transparent);
+            color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+            border-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
         }
 
         .badge.expiring {
-            background-color: rgba(255, 152, 0, 0.1);
-            color: #ff9800;
-            border-color: #ff9800;
+            background-color: var(--vscode-inputValidation-warningBackground, transparent);
+            color: var(--vscode-editorWarning-foreground);
+            border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
         }
 
         .badge.expired {
-            background-color: rgba(244, 67, 54, 0.1);
-            color: #f44336;
-            border-color: #f44336;
+            background-color: var(--vscode-inputValidation-errorBackground, transparent);
+            color: var(--vscode-editorError-foreground);
+            border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground));
         }
 
         .badge-icon {
@@ -387,12 +429,12 @@ export class CertificateExpiryPanel {
         }
 
         .expiry-date.expiring {
-            color: #ff9800;
+            color: var(--vscode-editorWarning-foreground);
             font-weight: 500;
         }
 
         .expiry-date.expired {
-            color: #f44336;
+            color: var(--vscode-editorError-foreground);
             font-weight: 500;
         }
 
@@ -410,6 +452,14 @@ export class CertificateExpiryPanel {
             to { transform: rotate(360deg); }
         }
 
+        .vscode-reduce-motion .loading-spinner {
+            animation: none;
+        }
+
+        .vscode-reduce-motion button {
+            transition: none;
+        }
+
         .no-results {
             text-align: center;
             padding: 40px 20px;
@@ -424,9 +474,9 @@ export class CertificateExpiryPanel {
             padding: 12px 16px;
             margin-bottom: 16px;
             border-radius: 6px;
-            border: 1px solid #f44336;
-            background-color: rgba(244, 67, 54, 0.1);
-            color: #f44336;
+            border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground));
+            background-color: var(--vscode-inputValidation-errorBackground, transparent);
+            color: var(--vscode-inputValidation-errorForeground, var(--vscode-editorError-foreground));
             font-size: 13px;
         }
 
@@ -485,6 +535,7 @@ export class CertificateExpiryPanel {
         /* Remove padding from the card that wraps the results table */
         .card.card-table {
             padding: 0;
+            overflow-x: auto;
         }
 
         /* CN column emphasis */
@@ -495,7 +546,7 @@ export class CertificateExpiryPanel {
 </head>
 <body>
     <h1>
-        <svg class="calendar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg class="calendar-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
             <line x1="16" y1="2" x2="16" y2="6"></line>
             <line x1="8" y1="2" x2="8" y2="6"></line>
@@ -508,7 +559,7 @@ export class CertificateExpiryPanel {
     <!-- Inline error banner (replaces alert() calls) -->
     <div class="error-banner" id="error-banner" role="alert">
         <span id="error-text"></span>
-        <button class="error-banner-close" id="error-close" aria-label="Dismiss">&times;</button>
+        <button class="error-banner-close" id="error-close" type="button" aria-label="Dismiss error">&times;</button>
     </div>
 
     <div class="card">
@@ -516,14 +567,14 @@ export class CertificateExpiryPanel {
         <div class="form-group">
             <label for="folder-path">Folder Path</label>
             <div class="input-with-button">
-                <input type="text" id="folder-path" placeholder="/path/to/certificates" readonly>
-                <button class="outline" id="browse-btn" title="Select Folder Path">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <input type="text" id="folder-path" maxlength="4096" placeholder="/path/to/certificates" readonly>
+                <button class="outline" id="browse-btn" type="button" aria-label="Select folder" title="Select Folder Path">
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
                     </svg>
                 </button>
-                <button class="primary" id="scan-btn">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button class="primary" id="scan-btn" type="button" aria-busy="false">
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                         <polyline points="14 2 14 8 20 8"></polyline>
                         <line x1="16" y1="13" x2="8" y2="13"></line>
@@ -532,8 +583,8 @@ export class CertificateExpiryPanel {
                     </svg>
                     <span id="scan-text">Scan Certificates</span>
                 </button>
-                <button class="outline initially-hidden" id="refresh-btn" title="Rescan Current Folder">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button class="outline initially-hidden" id="refresh-btn" type="button" aria-label="Rescan current folder" title="Rescan Current Folder">
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="23 4 23 10 17 10"></polyline>
                         <polyline points="1 20 1 14 7 14"></polyline>
                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
@@ -544,29 +595,29 @@ export class CertificateExpiryPanel {
     </div>
 
     <div id="results">
-        <div class="tabs">
-            <button class="tab active" data-tab="all">All (<span id="count-all">0</span>)</button>
-            <button class="tab" data-tab="expiring">Expiring Soon (<span id="count-expiring">0</span>)</button>
-            <button class="tab" data-tab="expired">Expired (<span id="count-expired">0</span>)</button>
-            <button class="tab" data-tab="valid">Valid (<span id="count-valid">0</span>)</button>
+        <div class="tabs" role="group" aria-label="Filter certificates by status">
+            <button class="tab active" type="button" aria-pressed="true" data-tab="all">All (<span id="count-all">0</span>)</button>
+            <button class="tab" type="button" aria-pressed="false" data-tab="expiring">Expiring Soon (<span id="count-expiring">0</span>)</button>
+            <button class="tab" type="button" aria-pressed="false" data-tab="expired">Expired (<span id="count-expired">0</span>)</button>
+            <button class="tab" type="button" aria-pressed="false" data-tab="valid">Valid (<span id="count-valid">0</span>)</button>
         </div>
 
         <div class="col-toggles">
-            <button class="outline" id="toggle-type" data-column="type">
+            <button class="outline" id="toggle-type" type="button" aria-pressed="false" data-column="type">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="9 11 12 14 22 4"></polyline>
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
                 </svg>
                 Show Type
             </button>
-            <button class="outline" id="toggle-format" data-column="format">
+            <button class="outline" id="toggle-format" type="button" aria-pressed="false" data-column="format">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="9 11 12 14 22 4"></polyline>
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
                 </svg>
                 Show Format
             </button>
-            <button class="outline" id="toggle-validfrom" data-column="validfrom">
+            <button class="outline" id="toggle-validfrom" type="button" aria-pressed="false" data-column="validfrom">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="9 11 12 14 22 4"></polyline>
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
@@ -577,6 +628,7 @@ export class CertificateExpiryPanel {
 
         <div class="card card-table">
             <table>
+                <caption class="visually-hidden">Certificate expiry scan results</caption>
                 <thead>
                     <tr>
                         <th>Status</th>
@@ -641,6 +693,7 @@ export class CertificateExpiryPanel {
                 const scanBtn = document.getElementById('scan-btn');
                 scanText.innerHTML = '<span class="loading-spinner"></span> Scanning...';
                 scanBtn.disabled = true;
+                scanBtn.setAttribute('aria-busy', 'true');
 
                 vscode.postMessage({
                     command: 'scanCertificates',
@@ -666,12 +719,13 @@ export class CertificateExpiryPanel {
                 if (button) {
                     const label = columnName === 'validfrom' ? 'Valid From'
                         : columnName.charAt(0).toUpperCase() + columnName.slice(1);
-                    button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                    button.innerHTML = '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
                         (isVisible ?
                             '<polyline points="20 6 9 17 4 12"></polyline>' :
                             '<polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>'
                         ) +
                         '</svg> ' + (isVisible ? 'Hide' : 'Show') + ' ' + label;
+                    button.setAttribute('aria-pressed', String(isVisible));
                 }
 
                 updateNoResultsColspan();
@@ -701,12 +755,7 @@ export class CertificateExpiryPanel {
             document.getElementById('scan-btn').addEventListener('click', triggerScan);
 
             document.getElementById('refresh-btn').addEventListener('click', () => {
-                const folderPath = document.getElementById('folder-path').value;
-                if (folderPath) {
-                    vscode.postMessage({ command: 'scanCertificates', folderPath });
-                } else {
-                    triggerScan();
-                }
+                triggerScan();
             });
 
             document.getElementById('toggle-type').addEventListener('click', () => toggleColumn('type'));
@@ -717,8 +766,11 @@ export class CertificateExpiryPanel {
             document.querySelectorAll('.tab').forEach(tab => {
                 tab.addEventListener('click', () => {
                     currentTab = tab.dataset.tab;
-                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                    tab.classList.add('active');
+                    document.querySelectorAll('.tab').forEach(t => {
+                        const isActive = t === tab;
+                        t.classList.toggle('active', isActive);
+                        t.setAttribute('aria-pressed', String(isActive));
+                    });
                     renderTable();
                 });
             });
@@ -806,9 +858,9 @@ export class CertificateExpiryPanel {
                 tbody.innerHTML = filtered.map(cert => {
                     const status = getStatus(cert);
                     const statusBadge = {
-                        valid: '<span class="badge valid"><svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg> Valid</span>',
-                        expiring: '<span class="badge expiring"><svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> Expiring Soon</span>',
-                        expired: '<span class="badge expired"><svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg> Expired</span>'
+                        valid: '<span class="badge valid"><svg class="badge-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg> Valid</span>',
+                        expiring: '<span class="badge expiring"><svg class="badge-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> Expiring Soon</span>',
+                        expired: '<span class="badge expired"><svg class="badge-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg> Expired</span>'
                     };
 
                     const dateClass = status === 'expired' ? 'expired' : (status === 'expiring' ? 'expiring' : '');
@@ -833,6 +885,19 @@ export class CertificateExpiryPanel {
                 const message = event.data;
 
                 switch (message.command) {
+                    case 'restoreState': {
+                        if (message.folderPath) {
+                            document.getElementById('folder-path').value = message.folderPath;
+                        }
+                        if (Array.isArray(message.certificates) && message.certificates.length) {
+                            allCertificates = message.certificates;
+                            document.getElementById('results').classList.add('show');
+                            document.getElementById('refresh-btn').classList.remove('initially-hidden');
+                            updateCounts();
+                            renderTable();
+                        }
+                        break;
+                    }
                     case 'folderSelected': {
                         document.getElementById('folder-path').value = message.path;
                         hideError();
@@ -841,6 +906,7 @@ export class CertificateExpiryPanel {
                         isScanning = true;
                         document.getElementById('scan-text').innerHTML = '<span class="loading-spinner"></span> Scanning...';
                         document.getElementById('scan-btn').disabled = true;
+                        document.getElementById('scan-btn').setAttribute('aria-busy', 'true');
 
                         vscode.postMessage({
                             command: 'scanCertificates',
@@ -853,6 +919,7 @@ export class CertificateExpiryPanel {
                         isScanning = false;
                         document.getElementById('scan-text').textContent = 'Scan Certificates';
                         document.getElementById('scan-btn').disabled = false;
+                        document.getElementById('scan-btn').setAttribute('aria-busy', 'false');
                         document.getElementById('refresh-btn').classList.remove('initially-hidden');
 
                         allCertificates = message.certificates;
@@ -866,11 +933,14 @@ export class CertificateExpiryPanel {
                         isScanning = false;
                         document.getElementById('scan-text').textContent = 'Scan Certificates';
                         document.getElementById('scan-btn').disabled = false;
+                        document.getElementById('scan-btn').setAttribute('aria-busy', 'false');
                         showError(message.message);
                         break;
                     }
                 }
             });
+
+            vscode.postMessage({ command: 'ready' });
         })();
     </script>
 </body>
