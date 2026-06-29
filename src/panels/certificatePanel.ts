@@ -13,11 +13,7 @@ import {
     parseCertificateInputFromText,
     validateArtifact,
 } from '../certificates/certificateUtils';
-import {
-    detectExternalToolAvailability,
-    inspectRemoteCertificate,
-    verifyWithOpenSsl,
-} from '../certificates/externalTools';
+import { detectExternalToolAvailability, inspectRemoteCertificate, verifyWithOpenSsl } from '../certificates/externalTools';
 
 interface LaunchRequest {
     type: 'inspect-active' | 'inspect-file' | 'inspect-remote' | 'open-tab';
@@ -27,6 +23,18 @@ interface LaunchRequest {
 }
 
 type ToolTab = 'inspect' | 'validate' | 'chain' | 'remote';
+const PICK_TARGETS = new Set(['inspect-file-path', 'validate-ca-file', 'validate-ca-path']);
+const VALIDATION_PURPOSES = new Set<ValidationPurpose>(['serverAuth', 'clientAuth', 'codeSigning', 'emailProtection']);
+const MAX_WEBVIEW_TEXT_BYTES = 1024 * 1024;
+const MAX_PASTED_TEXT_BYTES = 512 * 1024;
+
+function isWebviewMessage(value: unknown): value is Record<string, unknown> & { command: string } {
+    return typeof value === 'object' && value !== null && typeof (value as { command?: unknown }).command === 'string';
+}
+
+function optionalString(value: unknown): string | undefined {
+    return typeof value === 'string' ? value : undefined;
+}
 
 interface WebviewArtifactCertificate {
     summary: {
@@ -62,7 +70,6 @@ interface WebviewArtifactCertificate {
         infoAccessEntries: string[];
         ocspUrls: string[];
         caIssuersUrls: string[];
-        crlDistributionPoints: string[];
     };
     raw: {
         pem: string;
@@ -97,11 +104,11 @@ interface WebviewChainPayload {
 }
 
 export class CertificatePanel {
-    public static currentPanel: CertificatePanel | undefined;
+    private static currentPanel: CertificatePanel | undefined;
 
     private readonly panel: vscode.WebviewPanel;
     private readonly disposables: vscode.Disposable[] = [];
-    private readonly capabilities: ExternalToolAvailability;
+    private readonly capabilities: Promise<ExternalToolAvailability>;
     private currentArtifact: ParsedCertificateArtifact | undefined;
     private pendingLaunchRequest?: LaunchRequest;
 
@@ -115,13 +122,29 @@ export class CertificatePanel {
 
         this.panel.webview.onDidReceiveMessage(
             async (message) => {
+                if (!isWebviewMessage(message)) {
+                    return;
+                }
+
                 switch (message.command) {
                     case 'ready':
-                        this.postCapabilities();
+                        await this.postCapabilities();
+                        if (this.currentArtifact) {
+                            this.panel.webview.postMessage({
+                                command: 'artifactInspected',
+                                payload: this.serializeArtifact(this.currentArtifact),
+                            });
+                        }
                         await this.runPendingLaunchRequest();
                         return;
                     case 'pickPath':
-                        await this.handlePickPath(message.target, message.kind);
+                        if (
+                            typeof message.target === 'string' &&
+                            PICK_TARGETS.has(message.target) &&
+                            (message.kind === 'file' || message.kind === 'folder')
+                        ) {
+                            await this.handlePickPath(message.target, message.kind);
+                        }
                         return;
                     case 'inspectSource':
                         await this.handleInspectSource(message);
@@ -133,10 +156,14 @@ export class CertificatePanel {
                         this.handleAnalyzeCurrent();
                         return;
                     case 'inspectRemote':
-                        await this.handleInspectRemote(message.target);
+                        if (typeof message.target === 'string') {
+                            await this.handleInspectRemote(message.target);
+                        }
                         return;
                     case 'saveText':
-                        await this.handleSaveText(message.text, message.suggestedName);
+                        if (typeof message.text === 'string' && typeof message.suggestedName === 'string') {
+                            await this.handleSaveText(message.text, message.suggestedName);
+                        }
                         return;
                 }
             },
@@ -149,15 +176,14 @@ export class CertificatePanel {
         if (CertificatePanel.currentPanel) {
             CertificatePanel.currentPanel.pendingLaunchRequest = launchRequest;
             CertificatePanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
-            CertificatePanel.currentPanel.postCapabilities();
+            void CertificatePanel.currentPanel.postCapabilities();
             void CertificatePanel.currentPanel.runPendingLaunchRequest();
             return;
         }
 
         const panel = vscode.window.createWebviewPanel('certificatePanel', 'Certificate Tools', vscode.ViewColumn.One, {
             enableScripts: true,
-            retainContextWhenHidden: true,
-            localResourceRoots: [extensionUri],
+            localResourceRoots: [],
         });
 
         panel.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icons', 'certificate.svg');
@@ -191,29 +217,36 @@ export class CertificatePanel {
         });
     }
 
-    private async handleInspectSource(message: { sourceMode: 'paste' | 'file' | 'active'; text?: string; filePath?: string }) {
+    private async handleInspectSource(message: Record<string, unknown>) {
         try {
             let artifact: ParsedCertificateArtifact;
+            const sourceMode = message.sourceMode;
+            const filePath = optionalString(message.filePath);
+            const text = optionalString(message.text);
             switch (message.sourceMode) {
                 case 'file':
-                    if (!message.filePath?.trim()) {
+                    if (!filePath?.trim()) {
                         throw new Error('Choose a file to inspect.');
                     }
-                    artifact = parseCertificateInputFromFile(message.filePath.trim());
+                    artifact = parseCertificateInputFromFile(filePath.trim());
                     break;
                 case 'active':
                     artifact = this.parseActiveEditorArtifact();
                     break;
                 case 'paste':
-                default:
-                    if (!message.text?.trim()) {
+                    if (!text?.trim()) {
                         throw new Error('Paste certificate content to inspect.');
                     }
-                    artifact = parseCertificateInputFromText(message.text, {
+                    if (Buffer.byteLength(text) > MAX_PASTED_TEXT_BYTES) {
+                        throw new Error(`Pasted content exceeds the ${MAX_PASTED_TEXT_BYTES / 1024} KB limit. Use a file path instead.`);
+                    }
+                    artifact = parseCertificateInputFromText(text, {
                         kind: 'pasted',
                         label: 'Pasted input',
                     });
                     break;
+                default:
+                    throw new Error(`Unsupported inspection source: ${String(sourceMode)}`);
             }
 
             this.currentArtifact = artifact;
@@ -226,43 +259,57 @@ export class CertificatePanel {
         }
     }
 
-    private async handleValidateCurrent(message: {
-        hostname?: string;
-        purpose?: ValidationPurpose;
-        caFile?: string;
-        caPath?: string;
-    }) {
+    private async handleValidateCurrent(message: Record<string, unknown>) {
         if (!this.currentArtifact) {
             this.postError('validate', 'No certificate is loaded.', 'Inspect a certificate or chain first.');
             return;
         }
 
+        const hostname = optionalString(message.hostname)?.trim() || undefined;
+        const purpose =
+            typeof message.purpose === 'string' && VALIDATION_PURPOSES.has(message.purpose as ValidationPurpose)
+                ? (message.purpose as ValidationPurpose)
+                : undefined;
+        const caFile = optionalString(message.caFile)?.trim() || undefined;
+        const caPath = optionalString(message.caPath)?.trim() || undefined;
         const validation = validateArtifact(this.currentArtifact, {
-            hostname: message.hostname?.trim() || undefined,
-            purpose: message.purpose || undefined,
+            hostname,
+            purpose,
         });
 
         const issues = [...validation.issues];
         let command = '';
         let rawOutput = '';
 
-        if (message.caFile || message.caPath) {
-            const leafPem = this.currentArtifact.certificates[0]?.pem;
-            const chainPem = this.currentArtifact.certificates.slice(1).map((certificate) => certificate.pem).join('\n');
+        if (caFile || caPath) {
+            // Select the leaf the same way validateArtifact does (via chain.leafIndex) so OpenSSL
+            // trust verification and the native checks operate on the same certificate even when
+            // the bundle is out of order. Every other certificate is treated as an untrusted
+            // intermediate.
+            const certificates = this.currentArtifact.certificates;
+            const leafIndex = this.currentArtifact.chain?.leafIndex ?? 0;
+            const leafPem = certificates[leafIndex]?.pem;
+            const chainPem = certificates
+                .filter((_, index) => index !== leafIndex)
+                .map((certificate) => certificate.pem)
+                .join('\n');
             if (leafPem) {
-                const trustResult = verifyWithOpenSsl(leafPem, chainPem || undefined, message.caFile, message.caPath);
+                const trustResult = await verifyWithOpenSsl(leafPem, chainPem || undefined, caFile, caPath);
                 issues.push(...trustResult.issues);
                 command = trustResult.command;
                 rawOutput = trustResult.rawOutput;
             }
         }
 
+        const valid = !issues.some((issue) => issue.severity === 'error');
         this.panel.webview.postMessage({
             command: 'validationResult',
             payload: {
                 status: validation.status,
-                valid: !issues.some((issue) => issue.severity === 'error'),
-                summary: validation.summary,
+                valid,
+                // Recompute summary to reflect any additional issues (e.g. from OpenSSL trust
+                // verification) that were added after the initial validateArtifact call.
+                summary: valid ? 'Certificate validation passed with no errors.' : 'Certificate validation detected one or more errors.',
                 issues,
                 command,
                 rawOutput,
@@ -285,7 +332,7 @@ export class CertificatePanel {
 
     private async handleInspectRemote(target: string) {
         try {
-            const result = inspectRemoteCertificate(target);
+            const result = await inspectRemoteCertificate(target);
             this.currentArtifact = result.artifact;
             this.panel.webview.postMessage({
                 command: 'remoteResult',
@@ -302,16 +349,25 @@ export class CertificatePanel {
     }
 
     private async handleSaveText(text: string, suggestedName: string) {
-        const target = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', suggestedName)),
-            saveLabel: 'Save Output',
-        });
-        if (!target) {
-            return;
-        }
+        try {
+            if (Buffer.byteLength(text) > MAX_WEBVIEW_TEXT_BYTES) {
+                throw new Error('The requested output exceeds the 1 MB save limit.');
+            }
 
-        await vscode.workspace.fs.writeFile(target, Buffer.from(text, 'utf8'));
-        void vscode.window.showInformationMessage(`Saved ${path.basename(target.fsPath)}`);
+            const safeName = path.basename(suggestedName) || 'certificate.txt';
+            const target = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', safeName)),
+                saveLabel: 'Save Output',
+            });
+            if (!target) {
+                return;
+            }
+
+            await vscode.workspace.fs.writeFile(target, Buffer.from(text, 'utf8'));
+            void vscode.window.showInformationMessage(`Saved ${path.basename(target.fsPath)}`);
+        } catch (error) {
+            this.postError('inspect', 'Save failed.', error);
+        }
     }
 
     private parseActiveEditorArtifact(): ParsedCertificateArtifact {
@@ -322,12 +378,15 @@ export class CertificatePanel {
 
         const document = editor.document;
         const text = document.getText();
-        if (document.uri.scheme === 'file' && fs.existsSync(document.uri.fsPath)) {
+        if (!document.isDirty && document.uri.scheme === 'file' && fs.existsSync(document.uri.fsPath)) {
             return parseCertificateInputFromFile(document.uri.fsPath, 'active-editor');
         }
 
         if (!text.trim()) {
             throw new Error('The active editor is empty.');
+        }
+        if (Buffer.byteLength(text) > MAX_WEBVIEW_TEXT_BYTES) {
+            throw new Error('The active editor exceeds the 1 MB inspection limit. Choose the certificate file instead.');
         }
 
         return parseCertificateInputFromText(text, {
@@ -336,10 +395,10 @@ export class CertificatePanel {
         });
     }
 
-    private postCapabilities() {
+    private async postCapabilities() {
         this.panel.webview.postMessage({
             command: 'capabilities',
-            payload: this.capabilities,
+            payload: await this.capabilities,
         });
     }
 
@@ -439,7 +498,6 @@ export class CertificatePanel {
                 infoAccessEntries: certificate.infoAccessEntries,
                 ocspUrls: certificate.ocspUrls,
                 caIssuersUrls: certificate.caIssuersUrls,
-                crlDistributionPoints: certificate.crlDistributionPoints,
             },
             raw: {
                 pem: certificate.pem,
@@ -471,9 +529,8 @@ export class CertificatePanel {
     }
 
     private getWebviewContent(): string {
-        const webview = this.panel.webview;
         const nonce = crypto.randomBytes(16).toString('base64url');
-        const csp = `default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+        const csp = `default-src 'none'; base-uri 'none'; form-action 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -482,7 +539,7 @@ export class CertificatePanel {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="${csp}">
     <title>Certificate Tools</title>
-    <style>
+    <style nonce="${nonce}">
         :root {
             color-scheme: light dark;
         }
@@ -646,21 +703,21 @@ export class CertificatePanel {
         .badge.valid,
         .issue.valid,
         .issue.info {
-            background-color: rgba(76, 175, 80, 0.1);
-            color: #4caf50;
-            border-color: #4caf50;
+            background-color: var(--vscode-diffEditor-insertedTextBackground, transparent);
+            color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+            border-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
         }
         .badge.expiring,
         .issue.warning {
-            background-color: rgba(255, 152, 0, 0.1);
-            color: #ff9800;
-            border-color: #ff9800;
+            background-color: var(--vscode-inputValidation-warningBackground, transparent);
+            color: var(--vscode-editorWarning-foreground);
+            border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
         }
         .badge.expired,
         .issue.error {
-            background-color: rgba(244, 67, 54, 0.1);
-            color: #f44336;
-            border-color: #f44336;
+            background-color: var(--vscode-inputValidation-errorBackground, transparent);
+            color: var(--vscode-editorError-foreground);
+            border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground));
         }
         .badge-icon {
             width: 12px;
@@ -729,26 +786,26 @@ export class CertificatePanel {
     <h1>Certificate Tools</h1>
     <p class="lead">Inspect certificates and bundles, validate hostname and purpose, analyze chains, and fetch remote TLS certificates without leaving VS Code.</p>
 
-    <div class="tabs">
-        <button class="tab active" data-tab="inspect">Inspect</button>
-        <button class="tab" data-tab="validate">Validate</button>
-        <button class="tab" data-tab="chain">Chain</button>
-        <button class="tab" data-tab="remote">Remote</button>
+    <div class="tabs" role="tablist" aria-label="Certificate tools">
+        <button id="inspect-tab" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="inspect" data-tab="inspect">Inspect</button>
+        <button id="validate-tab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="validate" tabindex="-1" data-tab="validate">Validate</button>
+        <button id="chain-tab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="chain" tabindex="-1" data-tab="chain">Chain</button>
+        <button id="remote-tab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="remote" tabindex="-1" data-tab="remote">Remote</button>
     </div>
 
-    <section class="tab-content active" id="inspect">
+    <section class="tab-content active" id="inspect" role="tabpanel" aria-labelledby="inspect-tab">
         <div class="panel">
             <div class="grid">
                 <div class="field-wide">
                     <label for="inspect-file-path">Certificate File</label>
-                    <input id="inspect-file-path" type="text" placeholder="/path/to/certificate.crt or bundle.p12">
+                    <input id="inspect-file-path" type="text" maxlength="4096" placeholder="/path/to/certificate.crt or bundle.p12">
                     <div class="actions">
                         <button class="secondary" data-pick-target="inspect-file-path" data-pick-kind="file">Choose File</button>
                     </div>
                 </div>
                 <div class="field-wide">
                     <label for="inspect-text">Certificate, Bundle, CSR, or Key</label>
-                    <textarea id="inspect-text" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                    <textarea id="inspect-text" maxlength="${MAX_PASTED_TEXT_BYTES}" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
                 </div>
             </div>
             <div class="actions">
@@ -756,9 +813,9 @@ export class CertificatePanel {
                 <button class="secondary" id="clear-inspect-btn">Clear</button>
             </div>
         </div>
-        <div class="result-panel" id="inspect-result"></div>
+        <div class="result-panel" id="inspect-result" aria-live="polite"></div>
         <div class="info-footer">
-            <button class="ghost info-toggle" data-doc-target="inspect-docs">Info</button>
+            <button class="ghost info-toggle" type="button" aria-expanded="false" aria-controls="inspect-docs" data-doc-target="inspect-docs">Info</button>
             <div class="doc-panel" id="inspect-docs" hidden>
                 <h4>Inspect Tool Details</h4>
                 <p>Use this tool to classify the current artifact before validation or chain analysis. It accepts pasted text or a picked file.</p>
@@ -772,12 +829,12 @@ export class CertificatePanel {
         </div>
     </section>
 
-    <section class="tab-content" id="validate">
+    <section class="tab-content" id="validate" role="tabpanel" aria-labelledby="validate-tab" hidden>
         <div class="panel">
             <div class="grid">
                 <div class="field">
                     <label for="validate-hostname">Hostname</label>
-                    <input id="validate-hostname" type="text" placeholder="example.com">
+                    <input id="validate-hostname" type="text" maxlength="253" placeholder="example.com">
                 </div>
                 <div class="field">
                     <label for="validate-purpose">Purpose</label>
@@ -791,14 +848,14 @@ export class CertificatePanel {
                 </div>
                 <div class="field-wide">
                     <label for="validate-ca-file">CA File (optional)</label>
-                    <input id="validate-ca-file" type="text" placeholder="/path/to/ca.pem">
+                    <input id="validate-ca-file" type="text" maxlength="4096" placeholder="/path/to/ca.pem">
                     <div class="actions">
                         <button class="secondary" data-pick-target="validate-ca-file" data-pick-kind="file">Choose CA File</button>
                     </div>
                 </div>
                 <div class="field-wide">
                     <label for="validate-ca-path">CA Directory (optional)</label>
-                    <input id="validate-ca-path" type="text" placeholder="/path/to/ca-directory">
+                    <input id="validate-ca-path" type="text" maxlength="4096" placeholder="/path/to/ca-directory">
                     <div class="actions">
                         <button class="secondary" data-pick-target="validate-ca-path" data-pick-kind="folder">Choose CA Directory</button>
                     </div>
@@ -808,9 +865,9 @@ export class CertificatePanel {
                 <button id="validate-btn">Validate Current Artifact</button>
             </div>
         </div>
-        <div class="result-panel" id="validate-result"></div>
+        <div class="result-panel" id="validate-result" aria-live="polite"></div>
         <div class="info-footer">
-            <button class="ghost info-toggle" data-doc-target="validate-docs">Info</button>
+            <button class="ghost info-toggle" type="button" aria-expanded="false" aria-controls="validate-docs" data-doc-target="validate-docs">Info</button>
             <div class="doc-panel" id="validate-docs" hidden>
                 <h4>Validate Tool Details</h4>
                 <p>Validation works on the currently loaded artifact. Inspect a certificate or bundle first, then optionally add hostname, purpose, or CA trust inputs.</p>
@@ -823,16 +880,16 @@ export class CertificatePanel {
         </div>
     </section>
 
-    <section class="tab-content" id="chain">
+    <section class="tab-content" id="chain" role="tabpanel" aria-labelledby="chain-tab" hidden>
         <div class="panel">
             <p class="muted">Analyze the currently loaded certificate or chain. The chain view identifies leaf, intermediate, and root candidates, and flags duplicates or missing issuers.</p>
             <div class="actions">
                 <button id="chain-btn">Analyze Chain</button>
             </div>
         </div>
-        <div class="result-panel" id="chain-result"></div>
+        <div class="result-panel" id="chain-result" aria-live="polite"></div>
         <div class="info-footer">
-            <button class="ghost info-toggle" data-doc-target="chain-docs">Info</button>
+            <button class="ghost info-toggle" type="button" aria-expanded="false" aria-controls="chain-docs" data-doc-target="chain-docs">Info</button>
             <div class="doc-panel" id="chain-docs" hidden>
                 <h4>Chain Tool Details</h4>
                 <p>Chain analysis helps explain whether a bundle is ordered and complete enough for trust validation.</p>
@@ -845,21 +902,21 @@ export class CertificatePanel {
         </div>
     </section>
 
-    <section class="tab-content" id="remote">
+    <section class="tab-content" id="remote" role="tabpanel" aria-labelledby="remote-tab" hidden>
         <div class="panel">
             <div class="grid">
                 <div class="field-wide">
                     <label for="remote-target">Remote Host[:Port]</label>
-                    <input id="remote-target" type="text" placeholder="example.com:443">
+                    <input id="remote-target" type="text" maxlength="300" placeholder="example.com:443">
                 </div>
             </div>
             <div class="actions">
                 <button id="remote-inspect-btn">Fetch Remote Certificate Chain</button>
             </div>
         </div>
-        <div class="result-panel" id="remote-result"></div>
+        <div class="result-panel" id="remote-result" aria-live="polite"></div>
         <div class="info-footer">
-            <button class="ghost info-toggle" data-doc-target="remote-docs">Info</button>
+            <button class="ghost info-toggle" type="button" aria-expanded="false" aria-controls="remote-docs" data-doc-target="remote-docs">Info</button>
             <div class="doc-panel" id="remote-docs" hidden>
                 <h4>Remote Tool Details</h4>
                 <p>Remote inspection uses OpenSSL <code>s_client</code> to fetch the presented TLS chain for a host and port.</p>
@@ -877,12 +934,24 @@ export class CertificatePanel {
         const copyStore = new Map();
         let copyId = 0;
 
+        // Prune stale copy-store entries whenever a result panel is re-rendered so the
+        // Map does not grow without bound across many inspect/validate cycles.
+        function clearCopyStore() {
+            copyStore.clear();
+            copyId = 0;
+        }
+
         function setActiveTab(tabName) {
             document.querySelectorAll('.tab').forEach((tab) => {
-                tab.classList.toggle('active', tab.dataset.tab === tabName);
+                const isActive = tab.dataset.tab === tabName;
+                tab.classList.toggle('active', isActive);
+                tab.setAttribute('aria-selected', String(isActive));
+                tab.tabIndex = isActive ? 0 : -1;
             });
             document.querySelectorAll('.tab-content').forEach((content) => {
-                content.classList.toggle('active', content.id === tabName);
+                const isActive = content.id === tabName;
+                content.classList.toggle('active', isActive);
+                content.toggleAttribute('hidden', !isActive);
             });
         }
 
@@ -931,7 +1000,7 @@ export class CertificatePanel {
             };
             const status = config[kind] || config.warning;
             return '<span class="badge ' + status.className + '">' +
-                '<svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' + status.icon + '</svg>' +
+                '<svg class="badge-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' + status.icon + '</svg>' +
                 escapeHtml(text) +
             '</span>';
         }
@@ -942,6 +1011,7 @@ export class CertificatePanel {
         }
 
         function renderArtifact(hostId, payload) {
+            clearCopyStore();
             const host = document.getElementById(hostId);
             const warnings = payload.warnings.length
                 ? '<div class="section-card"><h4>Warnings</h4><ul class="warning-list">' +
@@ -1032,6 +1102,7 @@ export class CertificatePanel {
         }
 
         function renderValidation(payload) {
+            clearCopyStore();
             const host = document.getElementById('validate-result');
             const commandKey = payload.command ? stashCopy(payload.command) : undefined;
             const statusKind = payload.valid ? 'valid' : 'error';
@@ -1062,8 +1133,27 @@ export class CertificatePanel {
             host.innerHTML = '<h3>Error</h3>' + renderStatusPill('error', payload.summary) + '<pre>' + escapeHtml(payload.detail) + '</pre>';
         }
 
-        document.querySelectorAll('.tab').forEach((tab) => {
+        const tabs = Array.from(document.querySelectorAll('.tab'));
+        tabs.forEach((tab) => {
             tab.addEventListener('click', () => setActiveTab(tab.dataset.tab));
+            tab.addEventListener('keydown', (event) => {
+                const currentIndex = tabs.indexOf(tab);
+                let nextIndex;
+                if (event.key === 'ArrowRight') {
+                    nextIndex = (currentIndex + 1) % tabs.length;
+                } else if (event.key === 'ArrowLeft') {
+                    nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+                } else if (event.key === 'Home') {
+                    nextIndex = 0;
+                } else if (event.key === 'End') {
+                    nextIndex = tabs.length - 1;
+                } else {
+                    return;
+                }
+                event.preventDefault();
+                setActiveTab(tabs[nextIndex].dataset.tab);
+                tabs[nextIndex].focus();
+            });
         });
 
         document.querySelectorAll('.info-toggle').forEach((button) => {
@@ -1081,6 +1171,7 @@ export class CertificatePanel {
                     panel.setAttribute('hidden', '');
                     button.textContent = 'Info';
                 }
+                button.setAttribute('aria-expanded', String(shouldShow));
             });
         });
 

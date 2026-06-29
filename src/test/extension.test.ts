@@ -12,9 +12,18 @@ suite('extension manifest', () => {
     test('manifest contributes the expanded certificate commands', () => {
         const packageJsonPath = path.resolve(__dirname, '../../package.json');
         const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
-            contributes?: { commands?: Array<{ command: string }> };
+            contributes?: {
+                commands?: Array<{ command: string; title?: string; category?: string }>;
+                views?: unknown;
+                viewsContainers?: unknown;
+            };
+            capabilities?: {
+                untrustedWorkspaces?: { supported?: boolean };
+                virtualWorkspaces?: { supported?: boolean };
+            };
         };
-        const commands = new Set((packageJson.contributes?.commands ?? []).map((entry) => entry.command));
+        const commandEntries = packageJson.contributes?.commands ?? [];
+        const commands = new Set(commandEntries.map((entry) => entry.command));
 
         assert.ok(commands.has('certificateUtil.openCertificateTools'));
         assert.ok(commands.has('certificateUtil.openCertificateOperations'));
@@ -28,5 +37,11 @@ suite('extension manifest', () => {
         assert.ok(commands.has('certificateUtil.openKeystoreTool'));
         assert.ok(commands.has('certificateUtil.openRemoteTool'));
         assert.ok(commands.has('certificateUtil.openExpiryChecker'));
+        assert.ok(commandEntries.every((entry) => entry.category === 'Certificate Utility'));
+        assert.ok(commandEntries.every((entry) => /^(Inspect|Open) /.test(entry.title ?? '')));
+        assert.strictEqual(packageJson.contributes?.views, undefined);
+        assert.strictEqual(packageJson.contributes?.viewsContainers, undefined);
+        assert.strictEqual(packageJson.capabilities?.untrustedWorkspaces?.supported, true);
+        assert.strictEqual(packageJson.capabilities?.virtualWorkspaces?.supported, false);
     });
 });
