@@ -15,7 +15,6 @@ import {
 } from '../certificates/certificateUtils';
 import { detectExternalToolAvailability, inspectRemoteCertificate, verifyWithOpenSsl } from '../certificates/externalTools';
 import { getConfig } from '../config';
-import { checkRevocation } from '../certificates/revocation';
 
 interface LaunchRequest {
     type: 'inspect-active' | 'inspect-file' | 'inspect-remote' | 'open-tab';
@@ -321,6 +320,8 @@ export class CertificatePanel {
             const leaf = certificates[leafIndex];
             if (leaf) {
                 const issuer = certificates.find((candidate, index) => index !== leafIndex && candidate.subject === leaf.issuer);
+                // Loaded on demand so pkijs/asn1js are not evaluated unless a revocation check is run.
+                const { checkRevocation } = await import('../certificates/revocation.js');
                 const revocation = await checkRevocation(leaf.pem, issuer?.pem);
                 issues.push({
                     severity: revocation.status === 'revoked' ? 'error' : 'info',

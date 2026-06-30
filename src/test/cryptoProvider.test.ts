@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as forge from 'node-forge';
-import { decodeRichExtensions, parsePkcs12, parsePkcs7 } from '../certificates/cryptoProvider';
+import { decodeRichExtensions } from '../certificates/cryptoProvider';
+import { parsePkcs12, parsePkcs7 } from '../certificates/keystoreParser';
 
 interface ForgeKeypairCert {
     privateKey: forge.pki.rsa.PrivateKey;

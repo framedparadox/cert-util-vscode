@@ -26,6 +26,11 @@ const extensionConfig = {
     resolve: {
         // support reading TypeScript and JavaScript files, 📖 -> https://github.com/TypeStrong/ts-loader
         extensions: ['.ts', '.js'],
+        // tsconfig's Node16 module resolution requires .js specifiers on relative imports (including
+        // dynamic import()), even though the actual source files are .ts; map them back here.
+        extensionAlias: {
+            '.js': ['.ts', '.js'],
+        },
     },
     module: {
         rules: [

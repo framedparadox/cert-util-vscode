@@ -39,44 +39,56 @@ export function fetchRemoteCertificateSummary(
     }
 
     return new Promise((resolve) => {
+        let settled = false;
+        let socket: tls.TLSSocket | undefined;
+        // Idempotent: the first of secureConnect/timeout/error wins; later events are ignored and the
+        // socket is always torn down so no connection is leaked.
         const finish = (summary: RemoteCertificateSummary) => {
-            socket.destroy();
+            if (settled) {
+                return;
+            }
+            settled = true;
+            socket?.destroy();
             resolve(summary);
         };
 
-        const socket = tls.connect(
-            {
-                host,
-                port,
-                servername: host,
-                // We only want to read the presented certificate, not enforce trust.
-                rejectUnauthorized: false,
-                timeout: timeoutMs,
-            },
-            () => {
-                const peer = socket.getPeerCertificate();
-                if (!peer || !peer.valid_to) {
-                    finish({ endpoint, host, port, status: 'error', error: 'No certificate was presented.' });
-                    return;
-                }
-
-                const validTo = new Date(peer.valid_to);
-                const daysRemaining = Math.floor((validTo.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
-                finish({
-                    endpoint,
+        try {
+            socket = tls.connect(
+                {
                     host,
                     port,
-                    subject: peer.subject?.CN ?? formatName(peer.subject),
-                    issuer: peer.issuer?.CN ?? formatName(peer.issuer),
-                    validTo: validTo.toISOString(),
-                    daysRemaining,
-                    status: daysRemaining < 0 ? 'expired' : daysRemaining <= warningThresholdDays ? 'expiring' : 'valid',
-                });
-            }
-        );
+                    servername: host,
+                    // We only want to read the presented certificate, not enforce trust.
+                    rejectUnauthorized: false,
+                    timeout: timeoutMs,
+                },
+                () => {
+                    const peer = socket?.getPeerCertificate();
+                    if (!peer || !peer.valid_to) {
+                        finish({ endpoint, host, port, status: 'error', error: 'No certificate was presented.' });
+                        return;
+                    }
 
-        socket.on('timeout', () => finish({ endpoint, host, port, status: 'error', error: 'Connection timed out.' }));
-        socket.on('error', (error) => finish({ endpoint, host, port, status: 'error', error: error.message }));
+                    const validTo = new Date(peer.valid_to);
+                    const daysRemaining = Math.floor((validTo.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+                    finish({
+                        endpoint,
+                        host,
+                        port,
+                        subject: peer.subject?.CN ?? formatName(peer.subject),
+                        issuer: peer.issuer?.CN ?? formatName(peer.issuer),
+                        validTo: validTo.toISOString(),
+                        daysRemaining,
+                        status: daysRemaining < 0 ? 'expired' : daysRemaining <= warningThresholdDays ? 'expiring' : 'valid',
+                    });
+                }
+            );
+
+            socket.on('timeout', () => finish({ endpoint, host, port, status: 'error', error: 'Connection timed out.' }));
+            socket.on('error', (error) => finish({ endpoint, host, port, status: 'error', error: error.message }));
+        } catch (error) {
+            finish({ endpoint, host, port, status: 'error', error: error instanceof Error ? error.message : String(error) });
+        }
     });
 }
 

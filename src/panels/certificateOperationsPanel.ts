@@ -8,7 +8,9 @@ import {
     parseCertificateInputFromFile,
     parseCertificateInputFromText,
 } from '../certificates/certificateUtils';
-import { ParsedKeystore, parsePkcs7, parsePkcs12 } from '../certificates/cryptoProvider';
+// node-forge-backed keystore parsing is loaded lazily (dynamic import in the handlers below) so the
+// library is not evaluated at activation. Only the type is imported here (erased at runtime).
+import type { ParsedKeystore } from '../certificates/keystoreParser';
 import {
     buildDerToPemCommand,
     buildJksExportCommand,
@@ -209,6 +211,7 @@ export class CertificateOperationsPanel {
                     // Parse natively (node-forge) so inspection works without OpenSSL installed; fall
                     // back to the OpenSSL recipe only if native parsing fails for an unsupported file.
                     try {
+                        const { parsePkcs12 } = await import('../certificates/keystoreParser.js');
                         const parsed = parsePkcs12(readKeystoreFile(bundlePath), password ?? '');
                         this.postTextResult('convert', {
                             title: 'PKCS#12 Inspection',
@@ -233,6 +236,7 @@ export class CertificateOperationsPanel {
                         throw new Error('Bundle file path is required.');
                     }
                     try {
+                        const { parsePkcs7 } = await import('../certificates/keystoreParser.js');
                         const parsed = parsePkcs7(readKeystoreFile(bundlePath));
                         this.postTextResult('convert', {
                             title: 'PKCS#7 Inspection',

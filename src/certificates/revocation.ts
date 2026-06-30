@@ -21,6 +21,8 @@ export interface RevocationResult {
 
 /** How long a fetched CRL is cached before it is re-downloaded. */
 const CRL_CACHE_TTL_MS = 10 * 60 * 1000;
+/** Maximum number of distinct CRL URLs retained in the in-memory cache. */
+const CRL_CACHE_MAX_ENTRIES = 64;
 /** Upper bound on a downloaded CRL/OCSP response to avoid unbounded memory use. */
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const NETWORK_TIMEOUT_MS = 10_000;
@@ -197,6 +199,14 @@ async function fetchCrl(url: string): Promise<ArrayBuffer> {
         return cached.data;
     }
     const data = await fetchArrayBuffer(url, { method: 'GET' });
+    // Bound the cache so a long session that touches many distinct CRL URLs cannot grow without
+    // limit. Map preserves insertion order, so the first key is the oldest.
+    if (crlCache.size >= CRL_CACHE_MAX_ENTRIES) {
+        const oldest = crlCache.keys().next().value;
+        if (oldest !== undefined) {
+            crlCache.delete(oldest);
+        }
+    }
     crlCache.set(url, { fetchedAt: Date.now(), data });
     return data;
 }
@@ -217,14 +227,52 @@ async function fetchArrayBuffer(url: string, init: RequestInit): Promise<ArrayBu
         if (!response.ok) {
             throw new Error(`Request to ${url} failed with status ${response.status}.`);
         }
-        const data = await response.arrayBuffer();
-        if (data.byteLength > MAX_RESPONSE_BYTES) {
+        // Reject early if the server declares an oversized body...
+        const declaredLength = Number(response.headers.get('content-length'));
+        if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
             throw new Error('Revocation response exceeds the size limit.');
         }
-        return data;
+        // ...and stream the body with a running cap so a server that omits or lies about
+        // content-length (or uses chunked encoding) still cannot exhaust memory.
+        return await readBoundedBody(response, MAX_RESPONSE_BYTES);
     } finally {
         clearTimeout(timer);
     }
+}
+
+async function readBoundedBody(response: Response, limit: number): Promise<ArrayBuffer> {
+    const body = response.body;
+    if (!body) {
+        const data = await response.arrayBuffer();
+        if (data.byteLength > limit) {
+            throw new Error('Revocation response exceeds the size limit.');
+        }
+        return data;
+    }
+
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+            break;
+        }
+        total += value.byteLength;
+        if (total > limit) {
+            await reader.cancel();
+            throw new Error('Revocation response exceeds the size limit.');
+        }
+        chunks.push(value);
+    }
+
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return out.buffer;
 }
 
 function httpUrlFromAsn1GeneralName(name: Asn1GeneralName): string | undefined {

@@ -1,7 +1,6 @@
 // reflect-metadata must load before @peculiar/x509 (tsyringe-based DI).
 import 'reflect-metadata';
 import { webcrypto } from 'crypto';
-import * as forge from 'node-forge';
 import {
     BasicConstraintsExtension,
     ExtendedKeyUsageExtension,
@@ -17,24 +16,15 @@ import {
     cryptoProvider,
 } from '@peculiar/x509';
 
+import { CertificateSubject, KeyAlgorithm } from './keyAlgorithms';
+
 // @peculiar/x509 needs a WebCrypto engine for key generation, signing, and verification. The Node
 // extension host exposes one via `crypto.webcrypto`.
 const crypto = webcrypto as unknown as Crypto;
 cryptoProvider.set(crypto);
 
-export type KeyAlgorithm = 'RSA-2048' | 'RSA-3072' | 'RSA-4096' | 'EC-P256' | 'EC-P384' | 'Ed25519';
-
-export const KEY_ALGORITHMS: KeyAlgorithm[] = ['RSA-2048', 'RSA-3072', 'RSA-4096', 'EC-P256', 'EC-P384', 'Ed25519'];
-
-export interface CertificateSubject {
-    commonName: string;
-    organization?: string;
-    organizationalUnit?: string;
-    country?: string;
-    state?: string;
-    locality?: string;
-    email?: string;
-}
+export type { CertificateSubject, KeyAlgorithm } from './keyAlgorithms';
+export { KEY_ALGORITHMS } from './keyAlgorithms';
 
 export interface GeneratedKeyPair {
     keys: CryptoKeyPair;
@@ -137,18 +127,6 @@ export async function privateKeyMatchesCertificate(privateKeyPem: string, certif
     } catch {
         return false;
     }
-}
-
-/**
- * Builds a password-protected PKCS#12 / PFX container (3DES) from a certificate and its private key
- * using node-forge. Optional extra certificates are included as chain entries. Returns base64 DER.
- */
-export function buildPkcs12(certificatePem: string, privateKeyPem: string, password: string, chainPems: string[] = []): string {
-    const certificate = forge.pki.certificateFromPem(certificatePem);
-    const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
-    const chain = [certificate, ...chainPems.map((pem) => forge.pki.certificateFromPem(pem))];
-    const asn1 = forge.pkcs12.toPkcs12Asn1(privateKey, chain, password, { algorithm: '3des' });
-    return forge.util.encode64(forge.asn1.toDer(asn1).getBytes());
 }
 
 function generateParams(algorithm: KeyAlgorithm): RsaHashedKeyGenParams | EcKeyGenParams | { name: string } {

@@ -31,7 +31,13 @@ const CERTIFICATE_TOOLS: CertificateToolItem[] = [
         label: 'Generate Certificate',
         description: 'Create key pairs, CSRs, and self-signed certificates locally',
         command: 'certificateUtil.openGenerateTool',
-        icon: 'certificate.svg',
+        icon: 'certificate-gen.svg',
+    },
+    {
+        label: 'Documentation',
+        description: 'Component reference and a glossary of certificate/PKI terms',
+        command: 'certificateUtil.openDocumentation',
+        icon: 'documentation.svg',
     },
 ];
 

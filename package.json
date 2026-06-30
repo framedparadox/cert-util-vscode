@@ -1,8 +1,8 @@
 {
     "name": "certi",
     "displayName": "Certificate Utility",
-    "description": "Certificate utilities for validating, decoding, inspecting, and checking X.509 certificate expiration from VS Code.",
-    "version": "0.0.3",
+    "description": "Inspect, validate, generate, and monitor X.509 certificates, keystores, and CSRs from VS Code, with chain verification, revocation checks (CRL/OCSP), and expiry tracking.",
+    "version": "0.0.5",
     "publisher": "framedparadox",
     "license": "MIT",
     "icon": "resources/certificate.png",
@@ -14,8 +14,14 @@
         "ssl",
         "tls",
         "pkcs12",
+        "pkcs7",
         "jks",
+        "csr",
+        "ocsp",
+        "crl",
+        "revocation",
         "expiry",
+        "keystore",
         "developer tools"
     ],
     "repository": {
@@ -161,6 +167,12 @@
                 "title": "Open Remote Watchlist Report",
                 "category": "Certificate Utility",
                 "icon": "$(broadcast)"
+            },
+            {
+                "command": "certificateUtil.openDocumentation",
+                "title": "Open Documentation",
+                "category": "Certificate Utility",
+                "icon": "$(book)"
             }
         ],
         "menus": {

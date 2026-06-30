@@ -8,9 +8,8 @@ import {
     parseCertificateInputFromFile,
 } from './certificates/certificateUtils';
 import { CONFIG_SECTION, getConfig } from './config';
-import { privateKeyMatchesCertificate } from './certificates/generation';
 import { buildWatchlistReport, fetchWatchlist } from './certificates/remoteWatch';
-import { CertificateExpiryPanel, CertificateOperationsPanel, CertificatePanel, GeneratePanel } from './panels';
+import { CertificateExpiryPanel, CertificateOperationsPanel, CertificatePanel, DocumentationPanel, GeneratePanel } from './panels';
 import { CertificateDiffProvider, CertificateEditorProvider, CertificateToolsProvider } from './providers';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -133,6 +132,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     const watchlistCommand = vscode.commands.registerCommand('certificateUtil.checkRemoteWatchlist', () => checkRemoteWatchlist());
 
+    const documentationCommand = vscode.commands.registerCommand('certificateUtil.openDocumentation', () => {
+        DocumentationPanel.render(context.extensionUri);
+    });
+
     const sidebarViewProvider = vscode.window.registerWebviewViewProvider(
         'certificateUtilToolsView',
         new CertificateToolsProvider(context.extensionUri)
@@ -170,7 +173,8 @@ export function activate(context: vscode.ExtensionContext) {
         generateToolCommand,
         verifyKeyMatchCommand,
         compareCommand,
-        watchlistCommand
+        watchlistCommand,
+        documentationCommand
     );
 }
 
@@ -226,6 +230,8 @@ async function verifyKeyMatchesCertificate(): Promise<void> {
     try {
         const keyPem = Buffer.from(await vscode.workspace.fs.readFile(keySelection[0])).toString('utf8');
         const certPem = Buffer.from(await vscode.workspace.fs.readFile(certSelection[0])).toString('utf8');
+        // Loaded on demand so @peculiar/x509 is not evaluated at activation.
+        const { privateKeyMatchesCertificate } = await import('./certificates/generation.js');
         const matches = await privateKeyMatchesCertificate(keyPem, certPem);
         if (matches) {
             void vscode.window.showInformationMessage('The private key matches the certificate.');

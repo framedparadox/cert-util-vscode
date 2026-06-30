@@ -1,13 +1,7 @@
 import * as assert from 'assert';
 import { parseCertificateInputFromText } from '../certificates/certificateUtils';
-import { parsePkcs12 } from '../certificates/cryptoProvider';
-import {
-    buildPkcs12,
-    generateCsr,
-    generateKeyPair,
-    generateSelfSignedCertificate,
-    privateKeyMatchesCertificate,
-} from '../certificates/generation';
+import { buildPkcs12, parsePkcs12 } from '../certificates/keystoreParser';
+import { generateCsr, generateKeyPair, generateSelfSignedCertificate, privateKeyMatchesCertificate } from '../certificates/generation';
 
 suite('certificate generation', () => {
     test('generates an EC key pair as PEM', async () => {
@@ -69,7 +63,9 @@ suite('certificate generation', () => {
         assert.strictEqual(await privateKeyMatchesCertificate(a.privateKeyPem, b.certificatePem), false);
     });
 
-    test('builds a PKCS#12 container that round-trips', async () => {
+    test('builds a PKCS#12 container that round-trips', async function () {
+        // RSA-2048 key generation plus a node-forge PKCS#12 build can exceed Mocha's 2s default.
+        this.timeout(15000);
         const result = await generateSelfSignedCertificate({
             keyAlgorithm: 'RSA-2048',
             subject: { commonName: 'pfx.example.com' },

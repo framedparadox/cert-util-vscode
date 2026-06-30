@@ -1,14 +1,10 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import {
-    CertificateSubject,
-    KEY_ALGORITHMS,
-    KeyAlgorithm,
-    generateCsr,
-    generateKeyPair,
-    generateSelfSignedCertificate,
-} from '../certificates/generation';
+// Generation is loaded lazily (dynamic import in handleGenerate) so @peculiar/x509 generators are not
+// evaluated until the user actually generates something. The light constants/types come from a
+// dependency-free module.
+import { CertificateSubject, KEY_ALGORITHMS, KeyAlgorithm } from '../certificates/keyAlgorithms';
 
 const MAX_SAVE_TEXT_BYTES = 1024 * 1024;
 
@@ -95,6 +91,9 @@ export class GeneratePanel {
             .filter((value) => value.length > 0);
         const isCertificateAuthority = Boolean(message.isCertificateAuthority);
 
+        // Loaded on demand so @peculiar/x509 key generation is not evaluated at activation.
+        const { generateKeyPair, generateCsr, generateSelfSignedCertificate } = await import('../certificates/generation.js');
+
         const files: GenerateOutputFile[] = [];
         let summary = '';
 
@@ -156,7 +155,12 @@ export class GeneratePanel {
     }
 
     private resolveValidityDays(value?: number): number {
-        return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 365;
+        // Cap at ~100 years so an extreme value cannot overflow the notAfter date into "Invalid Date".
+        const MAX_VALIDITY_DAYS = 36500;
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+            return Math.min(Math.floor(value), MAX_VALIDITY_DAYS);
+        }
+        return 365;
     }
 
     private buildSubject(message: GenerateMessage): CertificateSubject {

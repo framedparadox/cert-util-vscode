@@ -9,6 +9,8 @@ import { ParsedCertificateDetails, parseCertificateInputFromFile } from '../cert
  */
 export class CertificateDiffProvider implements vscode.TextDocumentContentProvider {
     public static readonly scheme = 'cert-diff';
+    /** Bounds how many comparison summaries are retained so repeated compares cannot grow unbounded. */
+    private static readonly MAX_ENTRIES = 32;
     private readonly contents = new Map<string, string>();
 
     public static register(context: vscode.ExtensionContext): CertificateDiffProvider {
@@ -58,6 +60,12 @@ export class CertificateDiffProvider implements vscode.TextDocumentContentProvid
         }
         // A stable, unique virtual path per source file keeps repeat comparisons from colliding.
         const virtualPath = `/${Buffer.from(filePath).toString('base64url')}.txt`;
+        if (this.contents.size >= CertificateDiffProvider.MAX_ENTRIES && !this.contents.has(virtualPath)) {
+            const oldest = this.contents.keys().next().value;
+            if (oldest !== undefined) {
+                this.contents.delete(oldest);
+            }
+        }
         this.contents.set(virtualPath, certificateToComparableText(details));
         return vscode.Uri.from({ scheme: CertificateDiffProvider.scheme, path: virtualPath });
     }
