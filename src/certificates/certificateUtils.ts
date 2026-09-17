@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
+import { RichCertificateExtensions, decodeRichExtensions } from './cryptoProvider';
 
 export const SUPPORTED_CERTIFICATE_EXTENSIONS = ['.crt', '.cer', '.cert', '.pem', '.der', '.ca-bundle', '.ca', '.bundle'];
 export const CLASSIFIED_ARTIFACT_EXTENSIONS = ['.jks', '.p12', '.pfx', '.p7b', '.p7c', '.p7s', '.csr', '.key'];
@@ -69,6 +70,14 @@ export interface ParsedCertificateDetails {
     isCertificateAuthority: boolean;
     isSelfSigned: boolean;
     purposeHints: ValidationPurpose[];
+    authorityKeyIdentifier?: string;
+    subjectKeyIdentifier?: string;
+    basicConstraintsPathLength?: number;
+    crlDistributionPoints: string[];
+    certificatePolicies: string[];
+    nameConstraintsPermitted: string[];
+    nameConstraintsExcluded: string[];
+    hasEmbeddedScts: boolean;
 }
 
 export interface CertificateChainEntry {
@@ -78,6 +87,14 @@ export interface CertificateChainEntry {
     issuerCommonName: string;
     serialNumber: string;
     isSelfSigned: boolean;
+    /** Index of the certificate in this set whose subject issued this certificate, if present. */
+    issuerIndex?: number;
+    /**
+     * Result of cryptographically verifying this certificate's signature against its issuer's
+     * public key. `true`/`false` when an issuer was found in the set, `undefined` when the issuer
+     * certificate is not part of the supplied chain (so verification could not be attempted).
+     */
+    signatureVerified?: boolean;
 }
 
 export interface CertificateChainDetails {
@@ -111,6 +128,7 @@ export interface ValidationOptions {
     hostname?: string;
     purpose?: ValidationPurpose;
     referenceDate?: Date;
+    warningThresholdDays?: number;
 }
 
 export interface CertificateDetails {
@@ -155,6 +173,8 @@ interface ArtifactParseOptions {
     source: CertificateInputSource;
     content?: string | Buffer;
     filePath?: string;
+    /** Decode the richer extension set (default true). Disabled for bulk scans for performance. */
+    includeRichExtensions?: boolean;
 }
 
 export function normalizePem(input: string, type = 'CERTIFICATE'): string {
@@ -179,7 +199,7 @@ export function parseCertificateContent(content: string | Buffer, format = 'PEM'
     return toCertificateDetails(createParsedCertificateDetails(createX509Certificate(content), asPemString(content), format));
 }
 
-export function parseCertificateFile(filePath: string): CertificateDetails {
+export function parseCertificateFile(filePath: string, includeRichExtensions = true): CertificateDetails {
     const artifact = parseArtifact({
         source: {
             kind: 'file',
@@ -187,6 +207,7 @@ export function parseCertificateFile(filePath: string): CertificateDetails {
             filePath,
         },
         filePath,
+        includeRichExtensions,
     });
 
     if (!artifact.certificates.length) {
@@ -197,7 +218,8 @@ export function parseCertificateFile(filePath: string): CertificateDetails {
 }
 
 export function scanCertificateFile(filePath: string): ScannedCertificate {
-    const details = parseCertificateFile(filePath);
+    // Bulk scanning only needs summary fields, so skip the richer (slower) extension decoding.
+    const details = parseCertificateFile(filePath, false);
     const fileFormat = formatFromFilePath(filePath);
 
     return {
@@ -266,7 +288,7 @@ export function validateArtifact(artifact: ParsedCertificateArtifact, options: V
         });
     }
 
-    const status = getCertificateStatus(validTo, referenceDate);
+    const status = getCertificateStatus(validTo, referenceDate, options.warningThresholdDays);
     if (status === 'expired') {
         issues.push({
             severity: 'error',
@@ -295,6 +317,20 @@ export function validateArtifact(artifact: ParsedCertificateArtifact, options: V
                 ? 'Certificate is self-signed and acts as a certificate authority.'
                 : 'Certificate is self-signed.',
         });
+    }
+
+    issues.push(...assessAlgorithmStrength(leaf));
+
+    if (artifact.chain) {
+        for (const entry of artifact.chain.entries) {
+            if (entry.signatureVerified === false) {
+                issues.push({
+                    severity: 'error',
+                    code: 'chain-signature-invalid',
+                    message: `Certificate ${entry.index + 1} (${entry.subjectCommonName}) signature does not verify against its issuer in the chain.`,
+                });
+            }
+        }
     }
 
     issues.push({
@@ -394,6 +430,25 @@ export function analyzeCertificateChain(certificates: ParsedCertificateDetails[]
             role = 'intermediate';
         }
 
+        // Find the issuer certificate within this set (a different cert whose subject matches this
+        // cert's issuer) and cryptographically verify the signature, rather than trusting DN strings.
+        const issuerIndex = certificates.findIndex(
+            (candidate, candidateIndex) => candidateIndex !== index && candidate.subject === certificate.issuer
+        );
+        let signatureVerified: boolean | undefined;
+        if (certificate.isSelfSigned) {
+            signatureVerified = true;
+        } else if (issuerIndex !== -1) {
+            signatureVerified = verifyIssuedBy(certificate.pem, certificates[issuerIndex].pem);
+            if (signatureVerified === false) {
+                warnings.push(
+                    `Certificate ${index + 1} (${certificate.subjectCommonName || certificate.subject}) signature could not be cryptographically verified against its issuer ${
+                        certificates[issuerIndex].subjectCommonName || certificates[issuerIndex].subject
+                    }.`
+                );
+            }
+        }
+
         return {
             index,
             role,
@@ -401,6 +456,8 @@ export function analyzeCertificateChain(certificates: ParsedCertificateDetails[]
             issuerCommonName: certificate.issuerCommonName,
             serialNumber: certificate.serialNumber,
             isSelfSigned: certificate.isSelfSigned,
+            issuerIndex: issuerIndex === -1 ? undefined : issuerIndex,
+            signatureVerified,
         };
     });
 
@@ -459,14 +516,20 @@ export function extractFirstPemCertificate(content: string): string {
     return first.pem;
 }
 
-export function getCertificateStatus(validTo: string | Date, referenceDate = new Date()): CertificateStatus {
+export const DEFAULT_EXPIRY_WARNING_DAYS = 30;
+
+export function getCertificateStatus(
+    validTo: string | Date,
+    referenceDate = new Date(),
+    warningThresholdDays: number = DEFAULT_EXPIRY_WARNING_DAYS
+): CertificateStatus {
     const expiryDate = validTo instanceof Date ? validTo : new Date(validTo);
     if (Number.isNaN(expiryDate.getTime())) {
         throw new Error('Certificate expiry date is invalid.');
     }
 
-    const expiringThreshold = new Date(referenceDate);
-    expiringThreshold.setMonth(expiringThreshold.getMonth() + 1);
+    const days = Number.isFinite(warningThresholdDays) && warningThresholdDays > 0 ? warningThresholdDays : DEFAULT_EXPIRY_WARNING_DAYS;
+    const expiringThreshold = new Date(referenceDate.getTime() + days * 24 * 60 * 60 * 1000);
 
     if (expiryDate < referenceDate) {
         return 'expired';
@@ -498,7 +561,8 @@ function parseArtifact(options: ArtifactParseOptions): ParsedCertificateArtifact
     const pemBlocks = typeof rawContent === 'string' ? matchPemBlocks(rawContent) : matchPemBlocks(rawText);
     const blockTypes = [...new Set(pemBlocks.map((block) => block.type))];
     const warnings: string[] = [];
-    const certificates = parseCertificatesFromInput(rawContent, extension, pemBlocks, warnings);
+    const includeRichExtensions = options.includeRichExtensions ?? true;
+    const certificates = parseCertificatesFromInput(rawContent, extension, pemBlocks, warnings, includeRichExtensions);
 
     let kind: CertificateArtifactKind = 'unknown';
     if (certificates.length > 1) {
@@ -543,14 +607,15 @@ function parseCertificatesFromInput(
     rawContent: string | Buffer,
     extension: string,
     pemBlocks: PemBlock[],
-    warnings: string[]
+    warnings: string[],
+    includeRichExtensions = true
 ): ParsedCertificateDetails[] {
     const certificates: ParsedCertificateDetails[] = [];
     const certificateBlocks = pemBlocks.filter((block) => block.type === 'CERTIFICATE');
 
     for (const block of certificateBlocks) {
         try {
-            certificates.push(createParsedCertificateDetails(createX509Certificate(block.pem), block.pem, 'PEM'));
+            certificates.push(createParsedCertificateDetails(createX509Certificate(block.pem), block.pem, 'PEM', includeRichExtensions));
         } catch (error) {
             warnings.push(`Failed to parse PEM certificate block: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -562,7 +627,14 @@ function parseCertificatesFromInput(
 
     if (typeof rawContent !== 'string' && shouldAttemptDerParsing(extension)) {
         try {
-            return [createParsedCertificateDetails(createX509Certificate(rawContent), rawContent.toString('base64'), 'DER')];
+            return [
+                createParsedCertificateDetails(
+                    createX509Certificate(rawContent),
+                    rawContent.toString('base64'),
+                    'DER',
+                    includeRichExtensions
+                ),
+            ];
         } catch {
             // Fall through to classification-only behavior.
         }
@@ -571,7 +643,20 @@ function parseCertificatesFromInput(
     return [];
 }
 
-function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: string, format: string): ParsedCertificateDetails {
+const EMPTY_RICH_EXTENSIONS: RichCertificateExtensions = {
+    crlDistributionPoints: [],
+    certificatePolicies: [],
+    nameConstraintsPermitted: [],
+    nameConstraintsExcluded: [],
+    hasEmbeddedScts: false,
+};
+
+function createParsedCertificateDetails(
+    cert: crypto.X509Certificate,
+    pem: string,
+    format: string,
+    includeRichExtensions = true
+): ParsedCertificateDetails {
     const legacy = cert.toLegacyObject() as {
         ca?: boolean;
         bits?: number;
@@ -593,6 +678,9 @@ function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: strin
     // Parsed from the certificate DER because Node's X509Certificate does not expose the signature
     // algorithm as a property.
     const signatureAlgorithm = extractSignatureAlgorithm(cert);
+    // Richer extensions (AKI/SKI, CRL distribution points, policies, name constraints, SCTs) decoded
+    // via @peculiar/x509. Skipped during bulk scans where only summary fields are consumed.
+    const richExtensions = includeRichExtensions ? decodeRichExtensions(cert.raw) : EMPTY_RICH_EXTENSIONS;
 
     return {
         pem: pem.includes('-----BEGIN') ? pem : cert.toString(),
@@ -625,6 +713,14 @@ function createParsedCertificateDetails(cert: crypto.X509Certificate, pem: strin
         isCertificateAuthority: cert.ca,
         isSelfSigned: isCertificateSelfSigned(cert),
         purposeHints,
+        authorityKeyIdentifier: richExtensions.authorityKeyIdentifier,
+        subjectKeyIdentifier: richExtensions.subjectKeyIdentifier,
+        basicConstraintsPathLength: richExtensions.basicConstraintsPathLength,
+        crlDistributionPoints: richExtensions.crlDistributionPoints,
+        certificatePolicies: richExtensions.certificatePolicies,
+        nameConstraintsPermitted: richExtensions.nameConstraintsPermitted,
+        nameConstraintsExcluded: richExtensions.nameConstraintsExcluded,
+        hasEmbeddedScts: richExtensions.hasEmbeddedScts,
     };
 }
 
@@ -782,12 +878,72 @@ function isCertificateSelfSigned(cert: crypto.X509Certificate): boolean {
     }
 }
 
+/**
+ * Cryptographically verifies that `childPem` was signed by the private key corresponding to
+ * `issuerPem`'s public key. Returns false when the signature does not verify or either certificate
+ * cannot be parsed, so a tampered or mismatched chain link is reported as broken rather than throwing.
+ */
+function verifyIssuedBy(childPem: string, issuerPem: string): boolean {
+    try {
+        const child = createX509Certificate(childPem);
+        const issuer = createX509Certificate(issuerPem);
+        return child.verify(issuer.publicKey);
+    } catch {
+        return false;
+    }
+}
+
 /** Formats the public-key algorithm and strength for display, e.g. "RSA (2048-bit)" or "EC". */
 function formatKeyAlgorithm(publicKeyAlgorithm: string, bits?: number): string {
     if (publicKeyAlgorithm === 'Unknown') {
         return 'Unknown';
     }
     return typeof bits === 'number' ? `${publicKeyAlgorithm} (${bits}-bit)` : publicKeyAlgorithm;
+}
+
+/** Minimum acceptable public-key sizes in bits, keyed by public-key algorithm family. */
+const MINIMUM_KEY_BITS: Record<string, number> = {
+    RSA: 2048,
+    DSA: 2048,
+    EC: 256,
+    ED25519: 256,
+    ED448: 448,
+};
+
+/**
+ * Flags cryptographically weak certificate properties: signatures using a broken digest (MD5 is an
+ * error, SHA-1 a warning) and undersized public keys (e.g. RSA below 2048 bits). Returns an empty
+ * array when nothing of concern is found.
+ */
+export function assessAlgorithmStrength(details: ParsedCertificateDetails): ValidationIssue[] {
+    const issues: ValidationIssue[] = [];
+    const signature = details.signatureAlgorithm.toLowerCase();
+
+    if (signature.includes('md5') || signature.includes('md2')) {
+        issues.push({
+            severity: 'error',
+            code: 'weak-signature-algorithm',
+            message: `Certificate uses a broken signature algorithm (${details.signatureAlgorithm}). Treat this certificate as untrusted.`,
+        });
+    } else if (signature.includes('sha1') || signature.includes('-sha1') || signature.includes('with-sha1')) {
+        issues.push({
+            severity: 'warning',
+            code: 'weak-signature-algorithm',
+            message: `Certificate is signed with SHA-1 (${details.signatureAlgorithm}), which is deprecated and no longer collision-resistant.`,
+        });
+    }
+
+    const family = details.publicKeyAlgorithm.toUpperCase();
+    const minimum = MINIMUM_KEY_BITS[family];
+    if (typeof details.bits === 'number' && typeof minimum === 'number' && details.bits < minimum) {
+        issues.push({
+            severity: details.bits < minimum / 2 ? 'error' : 'warning',
+            code: 'weak-key-size',
+            message: `Public key is ${details.bits}-bit ${family}, below the recommended minimum of ${minimum} bits.`,
+        });
+    }
+
+    return issues;
 }
 
 const SIGNATURE_ALGORITHM_OIDS: Record<string, string> = {

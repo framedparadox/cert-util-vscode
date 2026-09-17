@@ -27,6 +27,18 @@ const CERTIFICATE_TOOLS: CertificateToolItem[] = [
         command: 'certificateUtil.openExpiryChecker',
         icon: 'cert-expiry.svg',
     },
+    {
+        label: 'Generate Certificate',
+        description: 'Create key pairs, CSRs, and self-signed certificates locally',
+        command: 'certificateUtil.openGenerateTool',
+        icon: 'certificate-gen.svg',
+    },
+    {
+        label: 'Documentation',
+        description: 'Component reference and a glossary of certificate/PKI terms',
+        command: 'certificateUtil.openDocumentation',
+        icon: 'documentation.svg',
+    },
 ];
 
 export class CertificateToolsProvider implements vscode.WebviewViewProvider {
@@ -51,12 +63,7 @@ export class CertificateToolsProvider implements vscode.WebviewViewProvider {
     }
 
     private escapeHtml(value: string): string {
-        return value
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+        return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     private renderTool(webview: vscode.Webview, tool: CertificateToolItem): string {

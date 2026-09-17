@@ -49,6 +49,27 @@ let toolAvailabilityCache: ExternalToolAvailability | undefined;
 let toolAvailabilityCacheTime = 0;
 let toolAvailabilityProbe: Promise<ExternalToolAvailability> | undefined;
 
+/**
+ * Resolved executables for OpenSSL and keytool. Defaults to the bare command name (found via PATH)
+ * and can be overridden from extension settings via {@link configureExternalTools}. Kept as module
+ * state — rather than importing the VS Code config here — so this module stays independently testable.
+ */
+let opensslCommand = 'openssl';
+let keytoolCommand = 'keytool';
+
+/**
+ * Overrides the OpenSSL/keytool executables used for all subsequent operations and command recipes.
+ * Empty or whitespace-only paths fall back to the bare command name. Resets the availability cache so
+ * the next probe reflects the new paths.
+ */
+export function configureExternalTools(options: { opensslPath?: string; keytoolPath?: string }): void {
+    opensslCommand = options.opensslPath?.trim() || 'openssl';
+    keytoolCommand = options.keytoolPath?.trim() || 'keytool';
+    toolAvailabilityCache = undefined;
+    toolAvailabilityCacheTime = 0;
+    toolAvailabilityProbe = undefined;
+}
+
 export async function detectExternalToolAvailability(forceRefresh = false): Promise<ExternalToolAvailability> {
     const now = Date.now();
     if (!forceRefresh && toolAvailabilityCache && now - toolAvailabilityCacheTime < TOOL_CACHE_TTL_MS) {
@@ -59,13 +80,14 @@ export async function detectExternalToolAvailability(forceRefresh = false): Prom
         return toolAvailabilityProbe;
     }
 
-    const probe = Promise.all([detectCommandVersion('openssl', ['version']), detectCommandVersion('keytool', ['-J-version'])]).then(
-        ([openssl, keytool]) => {
-            toolAvailabilityCache = { openssl, keytool };
-            toolAvailabilityCacheTime = Date.now();
-            return toolAvailabilityCache;
-        }
-    );
+    const probe = Promise.all([
+        detectCommandVersion(opensslCommand, ['version']),
+        detectCommandVersion(keytoolCommand, ['-J-version']),
+    ]).then(([openssl, keytool]) => {
+        toolAvailabilityCache = { openssl, keytool };
+        toolAvailabilityCacheTime = Date.now();
+        return toolAvailabilityCache;
+    });
     toolAvailabilityProbe = probe;
 
     try {
@@ -92,7 +114,7 @@ export async function inspectPkcs12File(filePath: string, password?: string): Pr
     // Pass the password through stdin so it does not appear in the process listing visible
     // to other users on the machine (e.g. via `ps aux` or /proc/<pid>/cmdline).
     const commandArgs = ['pkcs12', '-in', filePath, '-nodes', '-nokeys', '-passin', 'stdin'];
-    const result = await runCommand('openssl', commandArgs, password ?? '');
+    const result = await runCommand(opensslCommand, commandArgs, password ?? '');
     const artifact = result.ok
         ? parseCertificateInputFromText(result.stdout, {
               kind: 'file',
@@ -123,7 +145,7 @@ export async function inspectPkcs7File(filePath: string): Promise<PkcsInspection
         };
     }
 
-    const result = await runCommand('openssl', ['pkcs7', '-in', filePath, '-print_certs']);
+    const result = await runCommand(opensslCommand, ['pkcs7', '-in', filePath, '-print_certs']);
     const artifact = result.ok
         ? parseCertificateInputFromText(result.stdout, {
               kind: 'file',
@@ -157,7 +179,7 @@ export async function inspectRemoteCertificate(target: string): Promise<RemoteIn
     }
     args.push('-connect', endpoint);
 
-    const result = await runCommand('openssl', args, '', 15000);
+    const result = await runCommand(opensslCommand, args, '', 15000);
     if (!result.ok) {
         throw new Error(result.stderr || 'OpenSSL s_client failed.');
     }
@@ -221,7 +243,7 @@ export async function verifyWithOpenSsl(
 
     let result: CommandResult;
     try {
-        result = await runCommand('openssl', args);
+        result = await runCommand(opensslCommand, args);
     } finally {
         // Always remove temp files — even if runCommand somehow throws.
         fs.rmSync(tempDirectory, { recursive: true, force: true });
@@ -319,7 +341,7 @@ export async function listJksAliases(
             execArgs.push('-storepass:file', passFile);
         }
 
-        const result = await runCommand('keytool', execArgs);
+        const result = await runCommand(keytoolCommand, execArgs);
         return {
             summary: result.ok ? 'JKS aliases listed successfully.' : 'keytool could not list JKS aliases.',
             command: buildKeytoolCommand(displayArgs),
@@ -489,11 +511,11 @@ function runCommand(command: string, args: string[], input?: string, timeout = 1
 }
 
 function buildOpenSslCommand(args: string[]): string {
-    return ['openssl', ...args.map(shellQuote)].join(' ');
+    return [shellQuote(opensslCommand), ...args.map(shellQuote)].join(' ');
 }
 
 function buildKeytoolCommand(args: string[]): string {
-    return ['keytool', ...args.map(shellQuote)].join(' ');
+    return [shellQuote(keytoolCommand), ...args.map(shellQuote)].join(' ');
 }
 
 function shellQuote(value: string): string {
