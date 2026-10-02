@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Certificate Utility for VS Code — Inspect, validate and monitor X.509 certificates</title>
+<meta name="description" content="Inspect, validate, generate and monitor X.509 certificates, keystores and CSRs without leaving VS Code. Chain verification, CRL/OCSP revocation checks and expiry tracking — all local.">
+<meta name="theme-color" content="#ffffff">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Certificate Utility for VS Code">
+<meta property="og:description" content="Inspect, validate, generate and monitor X.509 certificates, keystores and CSRs — right inside VS Code.">
+<meta property="og:image" content="assets/logo.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/logo.png">
+<script>
+(function(){var d=document.documentElement;d.className='';var t;try{t=localStorage.getItem('theme')}catch(e){}
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';d.setAttribute('data-theme',t);
+var m=document.querySelector('meta[name=theme-color]');if(m&&t==='dark')m.content='#000000'})();
+</script>
+<link rel="stylesheet" href="style.css">
+<style>
+.cert-grid{display:grid;grid-template-columns:1.1fr 1fr;min-height:360px}
+.cert-main{padding:26px 28px;border-right:1px solid var(--win-line)}
+.cert-side{padding:26px 28px;background:color-mix(in srgb,var(--win-bar) 40%,var(--win))}
+.cert-main h4{font-size:20px;letter-spacing:-.02em;margin-bottom:2px}
+.cert-main .sub{color:var(--win-dim);font-size:13px;margin-bottom:18px}
+.kv{display:grid;grid-template-columns:104px 1fr;gap:9px 12px;font-size:13px}
+.kv dt{color:var(--win-dim)}.kv dd{font-family:var(--mono);font-size:12px;word-break:break-all}
+.pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:99px;font-family:var(--font)}
+.pill.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.pill.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.side-t{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--win-dim);margin-bottom:14px;font-weight:600}
+.chain{position:relative;display:grid;gap:12px;padding-left:22px}
+.chain::before{content:"";position:absolute;left:6px;top:14px;bottom:14px;width:2px;background:linear-gradient(var(--g1),var(--g2));border-radius:2px}
+.node{position:relative;background:var(--win);border:1px solid var(--win-line);border-radius:10px;padding:10px 12px;font-size:13px}
+.node::before{content:"";position:absolute;left:-22px;top:50%;width:14px;height:14px;margin-top:-7px;border-radius:50%;background:var(--win);border:3px solid var(--g1)}
+.node small{display:flex;justify-content:space-between;color:var(--win-dim);font-size:11.5px;margin-top:3px;gap:8px}
+.chk{margin-top:18px;display:grid;gap:8px;font-size:12.5px}
+.chk div{display:flex;gap:8px;align-items:center}.chk i{width:16px;height:16px;border-radius:50%;background:var(--ok);display:inline-grid;place-items:center;flex:none}
+.chk i::after{content:"";width:6px;height:3px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translate(1px,-1px)}
+.scan{width:100%;margin-top:20px;font-size:13px;border-collapse:collapse}
+.scan td{padding:9px 0;border-top:1px solid var(--line)}.scan td:last-child{text-align:right}
+.bar{height:6px;border-radius:6px;background:var(--line);overflow:hidden;margin-top:18px}.bar i{display:block;height:100%;width:68%;background:linear-gradient(90deg,var(--g1),var(--g2))}
+.fmt{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.fmt span{font-family:var(--mono);font-size:12.5px;padding:5px 10px;border-radius:8px;background:var(--card-2);color:var(--text-2)}
+.card.dark .fmt span{background:#1d1d1f;color:#d2d2d7}
+.lock{font-size:clamp(60px,9vw,96px);line-height:1}
+@media(max-width:760px){.cert-grid{grid-template-columns:1fr}.cert-main{border-right:0;border-bottom:1px solid var(--win-line)}}
+</style>
+</head>
+<body class="">
+<a class="sr" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap">
+  <a class="brand" href="#top"><img src="assets/logo.svg" alt="" width="24" height="24">Certificate Utility</a>
+  <ul id="links">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#how">How it works</a></li>
+    <li><a href="#formats">Formats</a></li>
+    <li><a href="#privacy">Privacy</a></li>
+    <li><a href="#reference">Reference</a></li>
+    <li><a href="#faq">FAQ</a></li>
+  </ul>
+  <div class="nav-end">
+    <button class="icon-btn" id="theme" aria-label="Toggle light and dark mode" title="Toggle theme">
+      <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <a class="btn sm" href="https://marketplace.visualstudio.com/items?itemName=framedparadox.certi">Install</a>
+    <button class="icon-btn menu-btn" id="menu" aria-label="Menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h16M4 16h16"/></svg></button>
+  </div>
+</div></header>
+
+<main id="main">
+<section class="hero" id="top" style="padding-bottom:0">
+<div class="wrap">
+  <p class="eyebrow">Certificate Utility for VS Code</p>
+  <h1>Certificates, <span class="grad">crystal clear.</span></h1>
+  <p class="lead">Inspect, validate, generate and monitor X.509 certificates, keystores and CSRs — without ever leaving your editor.</p>
+  <div class="cta">
+    <a class="btn" href="https://marketplace.visualstudio.com/items?itemName=framedparadox.certi">Install for VS Code</a>
+    <a class="btn ghost" href="#features">See what it does</a>
+  </div>
+  <div class="install"><code>ext install framedparadox.certi</code><button data-copy="ext install framedparadox.certi">Copy</button></div>
+  <p class="fine">Free and open source · MIT license · VS Code 1.105 or later · Also on <a href="https://open-vsx.org/extension/framedparadox/certi">Open VSX</a></p>
+
+  <div class="stage rv">
+    <div class="win">
+      <div class="win-bar"><i></i><i></i><i></i><span>Certificate Utility — api.example.com</span></div>
+      <div class="cert-grid">
+        <div class="cert-main">
+          <h4>api.example.com</h4>
+          <p class="sub">X.509 leaf certificate · ECDSA P-256 · SHA-256</p>
+          <dl class="kv">
+            <dt>Subject</dt><dd>CN=api.example.com, O=Example Inc</dd>
+            <dt>Issuer</dt><dd>CN=Example Issuing CA G2</dd>
+            <dt>SANs</dt><dd>api.example.com, *.api.example.com</dd>
+            <dt>Valid</dt><dd>2026-03-04 → 2026-12-01</dd>
+            <dt>Status</dt><dd><span class="pill warn">Expires in 59 days</span></dd>
+            <dt>Revocation</dt><dd><span class="pill ok">OCSP · Good</span></dd>
+            <dt>Fingerprint</dt><dd>3F:A9:C1:08:7B:E2:…:5D:90</dd>
+          </dl>
+        </div>
+        <div class="cert-side">
+          <div class="side-t">Chain</div>
+          <div class="chain">
+            <div class="node"><b>api.example.com</b><small><span>Leaf</span><span class="pill ok">Signature verified</span></small></div>
+            <div class="node"><b>Example Issuing CA G2</b><small><span>Intermediate</span><span class="pill ok">Signature verified</span></small></div>
+            <div class="node"><b>Example Root CA</b><small><span>Root</span><span class="pill ok">Self-signed</span></small></div>
+          </div>
+          <div class="chk">
+            <div><i></i>Hostname matches SAN</div>
+            <div><i></i>No weak algorithms or short keys</div>
+            <div><i></i>No missing issuers or duplicate serials</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<div class="wrap"><div class="stats rv">
+  <div><b>10+</b><span>certificate &amp; keystore formats</span></div>
+  <div><b>0</b><span>bytes uploaded, ever</span></div>
+  <div><b>CRL + OCSP</b><span>live revocation checks</span></div>
+  <div><b>No OpenSSL</b><span>needed for the common path</span></div>
+</div></div>
+
+<section id="features">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">Features</p><h2>Everything PKI.<br>One sidebar.</h2><p>A complete certificate workbench, built natively into VS Code. No browser tabs, no copy-pasting into sketchy websites, no command-line archaeology.</p></div>
+  <div class="bento">
+    <article class="card c4 rv">
+      <span class="tag">Inspect</span><h3>Decode anything. Instantly.</h3>
+      <p>Paste PEM, open a file, use the active editor or point at a live server. Certificate Utility classifies certificates, bundles, CSRs, private keys, PKCS#7, PKCS#12 and JKS — then decodes every detail.</p>
+      <ul><li>Subject, issuer, SANs, serial, fingerprints and public-key metadata</li><li>Key usage, EKU, authority information and signature algorithm</li><li>AKI/SKI, CRL distribution points, policies, name constraints, path length and SCT presence</li></ul>
+    </article>
+    <article class="card c2 dark rv">
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.4 8 8 9 4.6-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+      <h3>Validate with confidence</h3>
+      <p>Validity windows, hostname matching, CA vs leaf usage, self-signed detection, and warnings for MD5/SHA-1 and short keys.</p>
+    </article>
+    <article class="card c3 rv">
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><circle cx="19" cy="6" r="2.5"/><path d="M6.5 8l4 8M17.5 8l-4 8"/></svg></div>
+      <h3>Chains that actually verify</h3>
+      <p>Real cryptographic signature checks between every link — not just matching subject and issuer strings. Spot missing issuers, duplicate serials and broken links at a glance.</p>
+    </article>
+    <article class="card c3 rv">
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg></div>
+      <h3>Remote TLS, natively</h3>
+      <p>Fetch and inspect a server’s full certificate chain over a native TLS connection — no OpenSSL required. Prefer <code>s_client</code>? It’s supported when available.</p>
+    </article>
+    <article class="card c2 rv">
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+      <h3>Revocation checks</h3>
+      <p>Check status online via CRL and OCSP, right from the Validate tab.</p>
+    </article>
+    <article class="card c2 rv">
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div>
+      <h3>Expiry checker</h3>
+      <p>Scan a folder recursively, sort by expiry, filter and export JSON, Markdown or CSV for CI and audits.</p>
+    </article>
+    <article class="card c2 rv">
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div>
+      <h3>Remote watchlist</h3>
+      <p>Monitor every <code>host:port</code> you care about and get a Markdown status report.</p>
+    </article>
+    <article class="card c3 rv">
+      <span class="tag">Generate</span><h3>Keys, CSRs and certs.</h3>
+      <p>Create RSA (2048/3072/4096), EC (P-256/P-384) and Ed25519 key pairs. Generate CSRs with subject and SANs, self-signed or CA certificates with custom validity, and build PKCS#12 (PFX) bundles natively.</p>
+    </article>
+    <article class="card c3 rv">
+      <span class="tag">Convert &amp; keystore</span><h3>Format wrangling, solved.</h3>
+      <p>Inspect PKCS#7 and PKCS#12 natively. Generate ready-to-run OpenSSL and Java <code>keytool</code> commands for PEM ↔ DER, PFX export, and JKS to PKCS#12 — with explicit paths, so nothing is guessed.</p>
+    </article>
+    <article class="card c3 rv">
+      <span class="tag">Viewer &amp; diff</span><h3>Double-click to open.</h3>
+      <p>A read-only Certificate Viewer opens for <code>.pem</code>, <code>.crt</code>, <code>.cer</code>, <code>.der</code>, <code>.p7b</code> and friends. Compare two certificates side by side in a diff editor.</p>
+    </article>
+    <article class="card c3 rv">
+      <span class="tag">Key match</span><h3>Does this key fit?</h3>
+      <p>Verify a private key corresponds to a certificate by signing and verifying a nonce. No key material ever leaves your machine.</p>
+    </article>
+    <article class="card c6 rv" style="text-align:center">
+      <span class="tag">Built in</span><h3>Documentation &amp; glossary, included.</h3>
+      <p style="max-width:44em;margin:0 auto">A searchable reference for every tool plus a glossary of PKI terms — X.509, PEM, DER, PKCS#12, CSR, SAN, AKI/SKI, CRL, OCSP, fingerprints and more. Status bar expiry for the active file and right-click inspect in the Explorer complete the picture.</p>
+    </article>
+  </div>
+</div>
+</section>
+
+<section class="alt" id="how">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">How it works</p><h2>From question to answer in seconds.</h2></div>
+  <div class="steps rv">
+    <div class="step"><h3>Install</h3><p>Add Certificate Utility from the VS Code Marketplace or Open VSX. There’s nothing to configure.</p></div>
+    <div class="step"><h3>Open a tool</h3><p>Click the Certificates icon in the Activity Bar, run a command from the Command Palette, or right-click any certificate file.</p></div>
+    <div class="step"><h3>Get answers</h3><p>See decoded details, chain health, revocation status and expiry — and export what you need.</p></div>
+  </div>
+</div>
+</section>
+
+<section id="formats">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">Supported formats</p><h2>If it holds a key or a cert,<br>we read it.</h2></div>
+  <div class="bento">
+    <article class="card c3 rv"><span class="tag">Expiry scanner</span><h3>Parsed natively</h3><p>Files Node.js can read as X.509 certificates.</p><div class="fmt"><span>.crt</span><span>.cer</span><span>.cert</span><span>.pem</span><span>.der</span><span>.ca-bundle</span><span>.ca</span><span>.bundle</span></div></article>
+    <article class="card c3 dark rv"><span class="tag">Tools workbench</span><h3>Parsed or guided</h3><p>Natively parsed, or supported with generated commands.</p><div class="fmt"><span>.p12</span><span>.pfx</span><span>.p7b</span><span>.p7c</span><span>.p7s</span><span>.csr</span><span>.key</span><span>.jks</span></div></article>
+  </div>
+</div>
+</section>
+
+<section class="alt" id="privacy">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">Privacy</p><h2>Your keys stay yours.</h2><p>Parsing, generation and key matching run inside the VS Code extension host. Certificate contents, private keys and scan results are never uploaded, and there is no telemetry.</p></div>
+  <div class="bento">
+    <article class="card c2 rv"><h3>100% local</h3><p>Everything happens on your machine or your remote workspace.</p></article>
+    <article class="card c2 rv"><h3>Network on request</h3><p>Remote inspection, CRL/OCSP and the watchlist only connect to endpoints you enter or configure.</p></article>
+    <article class="card c2 rv"><h3>Untrusted workspaces</h3><p>Supported, so you can safely look at certificates in code you haven’t reviewed.</p></article>
+  </div>
+  <p class="fine" style="text-align:center;margin-top:28px"><a href="privacy.html">Read the full privacy statement</a></p>
+</div>
+</section>
+
+<section id="reference">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">Reference</p><h2>Commands &amp; settings.</h2><p>Open the Command Palette (<kbd>⇧⌘P</kbd> / <kbd>Ctrl+Shift+P</kbd>) and type “Certificate Utility”.</p></div>
+  <div class="cmds rv" style="margin-bottom:80px">
+    <div class="cmd"><span>Open Certificate Tools</span><code>certificateUtil.openCertificateTools</code></div>
+    <div class="cmd"><span>Open Certificate Generator</span><code>certificateUtil.openGenerateTool</code></div>
+    <div class="cmd"><span>Open Conversion &amp; Keystore</span><code>certificateUtil.openCertificateOperations</code></div>
+    <div class="cmd"><span>Open Certificate Expiry Checker</span><code>certificateUtil.openExpiryChecker</code></div>
+    <div class="cmd"><span>Inspect Active Certificate</span><code>certificateUtil.inspectActiveCertificate</code></div>
+    <div class="cmd"><span>Inspect Certificate File</span><code>certificateUtil.inspectCertificateFile</code></div>
+    <div class="cmd"><span>Inspect Remote Certificate</span><code>certificateUtil.inspectRemoteCertificate</code></div>
+    <div class="cmd"><span>Open Remote Watchlist Report</span><code>certificateUtil.checkRemoteWatchlist</code></div>
+    <div class="cmd"><span>Inspect Private Key and Certificate Match</span><code>certificateUtil.verifyKeyMatchesCertificate</code></div>
+    <div class="cmd"><span>Open Certificate Comparison</span><code>certificateUtil.compareCertificates</code></div>
+    <div class="cmd"><span>Open Inspect / Validate / Chain tool</span><code>certificateUtil.openInspectTool …</code></div>
+    <div class="cmd"><span>Open Convert / Keystore / Remote tool</span><code>certificateUtil.openConvertTool …</code></div>
+    <div class="cmd"><span>Open Documentation</span><code>certificateUtil.openDocumentation</code></div>
+  </div>
+  <div class="tbl-wrap rv"><table class="tbl">
+    <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>certificateUtil.expiryWarningDays</code></td><td>30</td><td>Days before expiry to report a certificate as “expiring soon” in validation, the expiry scanner and the status bar.</td></tr>
+      <tr><td><code>certificateUtil.defaultRemotePort</code></td><td>443</td><td>Port assumed when a remote TLS endpoint is entered without one.</td></tr>
+      <tr><td><code>certificateUtil.opensslPath</code></td><td>—</td><td>Path to OpenSSL. Leave empty to use <code>openssl</code> from your PATH.</td></tr>
+      <tr><td><code>certificateUtil.keytoolPath</code></td><td>—</td><td>Path to Java <code>keytool</code>. Leave empty to use <code>keytool</code> from your PATH.</td></tr>
+      <tr><td><code>certificateUtil.remoteWatchlist</code></td><td>[]</td><td>List of <code>host:port</code> endpoints monitored by the Remote Watchlist Report.</td></tr>
+    </tbody>
+  </table></div>
+</div>
+</section>
+
+<section class="alt" id="requirements">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">Requirements</p><h2>Light on dependencies.</h2></div>
+  <div class="bento">
+    <article class="card c2 rv"><span class="tag">Required</span><h3>VS Code 1.105+</h3><p>Runs in local and remote workspaces. Virtual workspaces aren’t supported.</p></article>
+    <article class="card c2 rv"><span class="tag">Optional</span><h3>OpenSSL</h3><p>Only for unusual PKCS#7/PKCS#12 variants, trust verification and <code>s_client</code> inspection.</p></article>
+    <article class="card c2 rv"><span class="tag">Optional</span><h3>Java keytool</h3><p>Only for JKS-specific actions.</p></article>
+  </div>
+</div>
+</section>
+
+<section id="faq">
+<div class="wrap">
+  <div class="head rv"><p class="eyebrow">FAQ</p><h2>Good questions.</h2></div>
+  <div class="faq rv">
+    <details><summary>Is it really free?</summary><p>Yes. Certificate Utility is open source under the MIT license.</p></details>
+    <details><summary>Do I need OpenSSL installed?</summary><p>No. Parsing, generation, chain verification, revocation checks and remote TLS inspection run natively. OpenSSL is only used as a fallback for rare PKCS#7/PKCS#12 variants, trust verification and optional <code>s_client</code> inspection.</p></details>
+    <details><summary>Does it upload my certificates or private keys?</summary><p>Never. Everything is processed in the extension host. The only network traffic is what you explicitly request: remote TLS inspection, CRL/OCSP lookups and watchlist checks.</p></details>
+    <details><summary>Can I use it in CI or audits?</summary><p>The expiry checker exports JSON, Markdown and CSV reports, and the remote watchlist produces a Markdown status report, so results are easy to keep and share.</p></details>
+    <details><summary>Does it work with remote and untrusted workspaces?</summary><p>It works in local and remote (SSH, containers, WSL) workspaces and in untrusted workspaces. Virtual file systems aren’t supported because certificate files and external tools need a real file system.</p></details>
+    <details><summary>Where do I report a bug or request a feature?</summary><p>Open an issue on <a href="https://github.com/framedparadox/cert-util-vscode/issues">GitHub</a>.</p></details>
+  </div>
+</div>
+</section>
+
+<section class="band">
+<div class="wrap rv">
+  <h2>Never miss an expiry again.</h2>
+  <p>Install Certificate Utility and bring your PKI workflow home to VS Code.</p>
+  <div class="cta"><a class="btn" href="https://marketplace.visualstudio.com/items?itemName=framedparadox.certi">Install for VS Code</a><a class="btn ghost" href="https://github.com/framedparadox/cert-util-vscode">View on GitHub</a></div>
+</div>
+</section>
+</main>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div class="links"><a href="https://marketplace.visualstudio.com/items?itemName=framedparadox.certi">VS Code Marketplace</a><a href="https://open-vsx.org/extension/framedparadox/certi">Open VSX</a><a href="https://github.com/framedparadox/cert-util-vscode">Source</a><a href="https://github.com/framedparadox/cert-util-vscode/issues">Issues</a><a href="https://github.com/framedparadox/cert-util-vscode/blob/HEAD/CHANGELOG.md">Changelog</a></div>
+    <div class="links"><a href="privacy.html">Privacy</a><a href="https://github.com/framedparadox/cert-util-vscode/blob/HEAD/LICENSE">MIT License</a><a href="https://github.com/framedparadox/developer-util-vscode">Also: Developer Utility Tools</a></div>
+  </div>
+  <p>© <span id="year">2026</span> framedparadox. Certificate Utility is an independent open-source project and is not affiliated with Microsoft or Apple.</p>
+</div></footer>
+<script src="site.js"></script>
+</body>
+</html>
